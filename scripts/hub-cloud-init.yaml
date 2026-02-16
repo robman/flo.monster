@@ -39,18 +39,20 @@ write_files:
     permissions: '0440'
 
   # Node.js environment loader (sourced by .bashrc and systemd service)
+  # NOTE: no owner field — flo-hub user doesn't exist yet during write_files stage.
+  # Ownership is set by chown -R in runcmd.
   - path: /home/flo-hub/setup-env.sh
-    owner: flo-hub:flo-hub
     permissions: '0755'
     content: |
       #!/usr/bin/env bash
       export NVM_DIR="/home/flo-hub/.nvm"
+      export COREPACK_ENABLE_AUTO_INSTALL=1
       [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
       nvm use 22 >/dev/null 2>&1
 
   # Hub configuration
+  # NOTE: no owner field — see setup-env.sh comment above
   - path: /home/flo-hub/.flo-monster/hub.json
-    owner: flo-hub:flo-hub
     permissions: '0600'
     content: |
       {
@@ -82,7 +84,7 @@ write_files:
       Type=simple
       User=flo-hub
       WorkingDirectory=/home/flo-hub/flo.monster/packages/hub
-      ExecStart=/bin/bash -c 'source /home/flo-hub/setup-env.sh && exec node ../../node_modules/.bin/tsx src/index.ts'
+      ExecStart=/bin/bash -c 'source /home/flo-hub/setup-env.sh && exec ./node_modules/.bin/tsx src/index.ts'
       Restart=always
       RestartSec=5
       PrivateTmp=true
@@ -112,7 +114,9 @@ packages:
   - jq
 
 runcmd:
-  # Set home directory permissions
+  # Fix home directory ownership — write_files may create /home/flo-hub as root
+  # before the users module assigns ownership
+  - chown -R flo-hub:flo-hub /home/flo-hub
   - chmod 750 /home/flo-hub
 
   # Create .flo-monster directory structure

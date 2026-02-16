@@ -586,12 +586,9 @@ create_cloud_init() {
   local template_path="${SCRIPT_DIR}/hub-cloud-init.yaml"
   if [[ ! -f "$template_path" ]]; then
     # When piped from curl, download the template from the same server
-    info "Downloading cloud-init template..."
-    local old_umask
-    old_umask="$(umask)"
-    umask 077
+    # NOTE: info must go to stderr — this function's stdout is captured by $()
+    info "Downloading cloud-init template..." >&2
     template_path="$(mktemp)"
-    umask "$old_umask"
     CLEANUP_FILES+=("$template_path")
     if ! curl -fsSL "${FLO_BASE_URL}/install/hub-cloud-init.yaml" -o "$template_path"; then
       error "Failed to download cloud-init template from ${FLO_BASE_URL}/install/hub-cloud-init.yaml"
@@ -599,34 +596,91 @@ create_cloud_init() {
     fi
   fi
 
-  # Create temp file with restrictive permissions
-  local old_umask
-  old_umask="$(umask)"
-  umask 077
+  # Create temp file — must be world-readable for Multipass daemon
   local tmpfile
   tmpfile="$(mktemp)"
-  umask "$old_umask"
-
   CLEANUP_FILES+=("$tmpfile")
 
-  # Generate hub.json content (escaped for sed insertion)
-  local hub_json
-  hub_json="$(generate_hub_json)"
+  # Compute template values
+  local hub_host trust_proxy setup_caddy setup_systemd safe_domain
+  if [[ "$SETUP_TYPE" == "domain" ]]; then
+    hub_host="127.0.0.1"
+    trust_proxy="true"
+    setup_caddy="true"
+    safe_domain="$DOMAIN"
+  else
+    hub_host="0.0.0.0"
+    trust_proxy="false"
+    setup_caddy="false"
+    # Empty domain breaks YAML (bare { becomes flow mapping) — use placeholder
+    safe_domain="placeholder.local"
+  fi
+  setup_systemd="true"
 
-  # Perform placeholder substitutions
+  # Perform placeholder substitutions (must match hub-cloud-init.yaml placeholders)
   sed \
     -e "s|{{FLO_REPO_URL}}|${FLO_REPO_URL}|g" \
-    -e "s|{{NODE_VERSION}}|${NODE_VERSION}|g" \
     -e "s|{{AUTH_TOKEN}}|${AUTH_TOKEN}|g" \
-    -e "s|{{ADMIN_TOKEN}}|${ADMIN_TOKEN}|g" \
-    -e "s|{{EMAIL}}|${EMAIL}|g" \
-    -e "s|{{DOMAIN}}|${DOMAIN}|g" \
-    -e "s|{{SETUP_TYPE}}|${SETUP_TYPE}|g" \
-    -e "s|{{HUB_PORT}}|${HUB_PORT}|g" \
-    -e "s|{{ADMIN_PORT}}|${ADMIN_PORT}|g" \
+    -e "s|{{VAPID_EMAIL}}|${EMAIL}|g" \
+    -e "s|{{HUB_HOST}}|${hub_host}|g" \
+    -e "s|{{TRUST_PROXY}}|${trust_proxy}|g" \
+    -e "s|{{DOMAIN}}|${safe_domain}|g" \
+    -e "s|{{SETUP_CADDY}}|${setup_caddy}|g" \
+    -e "s|{{SETUP_SYSTEMD}}|${setup_systemd}|g" \
     "$template_path" > "$tmpfile"
 
+  # Multipass daemon runs as a separate user — file must be readable
+  chmod 644 "$tmpfile"
+
   echo "$tmpfile"
+}
+
+# -----------------------------------------------------------------------------
+# health_check_hub — Verify the hub is responding before printing success
+# -----------------------------------------------------------------------------
+health_check_hub() {
+  local host="$1"
+  local port="${2:-8765}"
+  local max_attempts=30
+  local attempt=0
+
+  info "Verifying hub is running..."
+  while [[ $attempt -lt $max_attempts ]]; do
+    if curl -sf "http://${host}:${port}/api/status" 2>/dev/null | grep -q '"ok"'; then
+      success "Hub is responding"
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    sleep 2
+  done
+
+  warn "Hub may not be running yet — check with: flo-admin logs"
+  return 1
+}
+
+# -----------------------------------------------------------------------------
+# install_flo_admin — Install the flo-admin CLI wrapper to /usr/local/bin
+# -----------------------------------------------------------------------------
+install_flo_admin() {
+  local flo_admin_path="/usr/local/bin/flo-admin"
+
+  info "Installing flo-admin CLI..."
+
+  # Try to get flo-admin.sh from local repo first, then download
+  local source_path="${SCRIPT_DIR}/flo-admin.sh"
+  if [[ -f "$source_path" ]]; then
+    sudo cp "$source_path" "$flo_admin_path"
+  else
+    # Download from the same server as the installer
+    if ! curl -fsSL "${FLO_BASE_URL}/install/flo-admin.sh" -o /tmp/flo-admin.sh; then
+      warn "Could not download flo-admin CLI — you can install it manually later"
+      return 0
+    fi
+    sudo mv /tmp/flo-admin.sh "$flo_admin_path"
+  fi
+
+  sudo chmod +x "$flo_admin_path"
+  success "flo-admin installed to $flo_admin_path"
 }
 
 # -----------------------------------------------------------------------------
@@ -681,6 +735,13 @@ run_multipass_install() {
 
   success "VM provisioned successfully"
 
+  # Get VM IP address (needed for health check)
+  local vm_ip
+  vm_ip="$(multipass info "$INSTANCE_NAME" --format json | jq -r ".info[\"${INSTANCE_NAME}\"].ipv4[0]")"
+
+  # Health check
+  health_check_hub "$vm_ip" "$HUB_PORT"
+
   # Retrieve auth token from the VM
   local vm_auth_token
   vm_auth_token="$(multipass exec "$INSTANCE_NAME" -- sudo cat /home/flo-hub/.flo-monster/hub.json | jq -r '.authToken')"
@@ -694,9 +755,8 @@ run_multipass_install() {
     ADMIN_TOKEN="$vm_admin_token"
   fi
 
-  # Get VM IP address
-  local vm_ip
-  vm_ip="$(multipass info "$INSTANCE_NAME" --format json | jq -r ".info[\"${INSTANCE_NAME}\"].ipv4[0]")"
+  # Install flo-admin CLI on the host
+  install_flo_admin
 
   # Print results
   print_multipass_results "$vm_ip"
@@ -1038,6 +1098,14 @@ run_direct_install() {
   setup_caddy
   setup_systemd
 
+  # Health check (only if systemd service was installed)
+  if [[ "$INSTALL_SYSTEMD" == "yes" ]]; then
+    health_check_hub "localhost" "$HUB_PORT"
+  fi
+
+  # Install flo-admin CLI
+  install_flo_admin
+
   print_direct_results
 }
 
@@ -1077,15 +1145,16 @@ print_multipass_results() {
   echo "  5. Click Connect"
   echo
   hr
-  echo "  Management commands:"
+  echo "  Management:"
   hr
   echo
-  echo "  Shell into VM:       multipass shell ${INSTANCE_NAME}"
-  echo "  View hub logs:       multipass exec ${INSTANCE_NAME} -- sudo journalctl -u flo-hub -f"
-  echo "  Restart hub:         multipass exec ${INSTANCE_NAME} -- sudo systemctl restart flo-hub"
-  echo "  Stop VM:             multipass stop ${INSTANCE_NAME}"
-  echo "  Start VM:            multipass start ${INSTANCE_NAME}"
-  echo "  Delete VM:           multipass delete ${INSTANCE_NAME} --purge"
+  echo "  flo-admin status      Service status"
+  echo "  flo-admin logs        Tail hub logs"
+  echo "  flo-admin restart     Restart the hub"
+  echo "  flo-admin shell       Shell as flo-hub user"
+  echo "  flo-admin info        Show connection details"
+  echo "  flo-admin config      View configuration"
+  echo "  flo-admin uninstall   Remove the hub"
   echo
   hr
   echo "  Documentation: https://flo.monster/docs/hub"
@@ -1133,31 +1202,23 @@ print_direct_results() {
   echo "  5. Click Connect"
   echo
   hr
-  echo "  Management commands:"
+  echo "  Management:"
   hr
   echo
 
   if [[ "$INSTALL_SYSTEMD" == "yes" ]]; then
-    echo "  Service status:    sudo systemctl status flo-hub"
-    echo "  View logs:         sudo journalctl -u flo-hub -f"
-    echo "  Restart:           sudo systemctl restart flo-hub"
-    echo "  Stop:              sudo systemctl stop flo-hub"
-    echo "  Start:             sudo systemctl start flo-hub"
+    echo "  flo-admin status      Service status"
+    echo "  flo-admin logs        Tail hub logs"
+    echo "  flo-admin restart     Restart the hub"
+    echo "  flo-admin shell       Shell as flo-hub user"
+    echo "  flo-admin info        Show connection details"
+    echo "  flo-admin config      View configuration"
+    echo "  flo-admin uninstall   Remove the hub"
   else
     echo "  Start manually:    sudo -u flo-hub bash -c 'source ~/setup-env.sh && cd ~/flo.monster/packages/hub && node ../../node_modules/.bin/tsx src/index.ts'"
   fi
 
   echo
-  echo "  Edit config:       sudo -u flo-hub nano /home/flo-hub/.flo-monster/hub.json"
-  echo "  Sandbox dir:       /home/flo-hub/.flo-monster/sandbox"
-  echo "  Agent data:        /home/flo-hub/.flo-monster/agents"
-  echo
-
-  if [[ "$SETUP_TYPE" == "domain" ]]; then
-    echo "  Caddy status:      sudo systemctl status caddy"
-    echo "  Caddy config:      /etc/caddy/Caddyfile"
-    echo
-  fi
 
   hr
   echo "  Documentation: https://flo.monster/docs/hub"
