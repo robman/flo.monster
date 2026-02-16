@@ -2,11 +2,10 @@
 # =============================================================================
 # flo.monster Hub Server — Admin CLI
 #
-# Management wrapper for the flo.monster hub server.
-# Auto-detects Multipass VM or direct installation and routes commands
-# accordingly.
+# Management CLI for the flo.monster hub server.
+# Runs directly on the hub server (or inside a Multipass VM).
 #
-# Installed to /usr/local/bin/flo-admin by the hub installer.
+# Installed to /usr/local/bin/flo-admin by cloud-init or the direct installer.
 #
 # Usage:
 #   flo-admin <command>
@@ -16,8 +15,7 @@
 set -euo pipefail
 
 VERSION="1.0.0"
-INSTALL_MODE=""   # "multipass" or "direct"
-VM_NAME="flo-hub"
+SERVICE_NAME="flo-hub"
 HUB_USER="flo-hub"
 HUB_JSON_PATH="/home/flo-hub/.flo-monster/hub.json"
 HUB_PORT=8765
@@ -36,26 +34,18 @@ hr() {
 }
 
 # -----------------------------------------------------------------------------
-# detect_mode — Determine if we're managing a Multipass VM or direct install
+# check_install — Verify we have a hub installation
 # -----------------------------------------------------------------------------
-detect_mode() {
-  # Check for Multipass VM named flo-hub
-  if command -v multipass >/dev/null 2>&1 && multipass list 2>/dev/null | grep -q "$VM_NAME"; then
-    INSTALL_MODE="multipass"
-    return
-  fi
-
-  # Check for direct install (systemd service or flo-hub user)
-  if systemctl is-active "$VM_NAME" >/dev/null 2>&1 || id "$HUB_USER" >/dev/null 2>&1; then
-    INSTALL_MODE="direct"
+check_install() {
+  if systemctl is-active "$SERVICE_NAME" >/dev/null 2>&1 || id "$HUB_USER" >/dev/null 2>&1; then
     return
   fi
 
   error "No flo.monster hub installation found."
   echo
   echo "  Expected one of:"
-  echo "    - Multipass VM named '$VM_NAME'"
-  echo "    - systemd service '$VM_NAME' or user '$HUB_USER'"
+  echo "    - systemd service '$SERVICE_NAME'"
+  echo "    - user '$HUB_USER'"
   echo
   echo "  Install a hub server with:"
   echo "    curl -fsSL https://flo.monster/install/hub.sh | bash"
@@ -64,14 +54,9 @@ detect_mode() {
 
 # -----------------------------------------------------------------------------
 # read_hub_json — Read hub.json and output its contents
-# In Multipass mode, reads from the VM. In direct mode, reads locally.
 # -----------------------------------------------------------------------------
 read_hub_json() {
-  if [[ "$INSTALL_MODE" == "multipass" ]]; then
-    multipass exec "$VM_NAME" -- sudo cat "$HUB_JSON_PATH" 2>/dev/null
-  else
-    sudo cat "$HUB_JSON_PATH" 2>/dev/null
-  fi
+  sudo cat "$HUB_JSON_PATH" 2>/dev/null
 }
 
 # -----------------------------------------------------------------------------
@@ -85,11 +70,7 @@ redact_tokens() {
 # get_hub_ip — Get the IP address of the hub
 # -----------------------------------------------------------------------------
 get_hub_ip() {
-  if [[ "$INSTALL_MODE" == "multipass" ]]; then
-    multipass info "$VM_NAME" 2>/dev/null | grep -i 'ipv4' | awk '{print $2}'
-  else
-    hostname -I 2>/dev/null | awk '{print $1}'
-  fi
+  hostname -I 2>/dev/null | awk '{print $1}'
 }
 
 # -----------------------------------------------------------------------------
@@ -97,59 +78,34 @@ get_hub_ip() {
 # -----------------------------------------------------------------------------
 
 cmd_status() {
-  if [[ "$INSTALL_MODE" == "multipass" ]]; then
-    multipass exec "$VM_NAME" -- sudo systemctl status "$VM_NAME"
-  else
-    sudo systemctl status "$VM_NAME"
-  fi
+  sudo systemctl status "$SERVICE_NAME"
 }
 
 cmd_logs() {
-  if [[ "$INSTALL_MODE" == "multipass" ]]; then
-    multipass exec "$VM_NAME" -- sudo journalctl -u "$VM_NAME" -f --no-pager -n 100
-  else
-    sudo journalctl -u "$VM_NAME" -f --no-pager -n 100
-  fi
+  sudo journalctl -u "$SERVICE_NAME" -f --no-pager -n 100
 }
 
 cmd_restart() {
   info "Restarting flo-hub service..."
-  if [[ "$INSTALL_MODE" == "multipass" ]]; then
-    multipass exec "$VM_NAME" -- sudo systemctl restart "$VM_NAME"
-  else
-    sudo systemctl restart "$VM_NAME"
-  fi
+  sudo systemctl restart "$SERVICE_NAME"
   success "Service restarted"
 }
 
 cmd_stop() {
   info "Stopping flo-hub service..."
-  if [[ "$INSTALL_MODE" == "multipass" ]]; then
-    multipass exec "$VM_NAME" -- sudo systemctl stop "$VM_NAME"
-  else
-    sudo systemctl stop "$VM_NAME"
-  fi
+  sudo systemctl stop "$SERVICE_NAME"
   success "Service stopped"
 }
 
 cmd_start() {
   info "Starting flo-hub service..."
-  if [[ "$INSTALL_MODE" == "multipass" ]]; then
-    multipass exec "$VM_NAME" -- sudo systemctl start "$VM_NAME"
-  else
-    sudo systemctl start "$VM_NAME"
-  fi
+  sudo systemctl start "$SERVICE_NAME"
   success "Service started"
 }
 
 cmd_shell() {
-  if [[ "$INSTALL_MODE" == "multipass" ]]; then
-    info "Opening shell as $HUB_USER in Multipass VM..."
-    multipass exec "$VM_NAME" -- sudo -u "$HUB_USER" -i
-  else
-    info "Opening shell as $HUB_USER..."
-    sudo -u "$HUB_USER" -i
-  fi
+  info "Opening shell as $HUB_USER..."
+  sudo -u "$HUB_USER" -i
 }
 
 cmd_config() {
@@ -183,13 +139,8 @@ cmd_info() {
   # Determine the hub URL
   if [[ "$hub_host" == "127.0.0.1" ]]; then
     # Behind reverse proxy (Caddy) — likely domain mode
-    # Try to get the domain from Caddyfile
     local domain=""
-    if [[ "$INSTALL_MODE" == "multipass" ]]; then
-      domain="$(multipass exec "$VM_NAME" -- sudo head -1 /etc/caddy/Caddyfile 2>/dev/null | grep -oE '[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}' || true)"
-    else
-      domain="$(sudo head -1 /etc/caddy/Caddyfile 2>/dev/null | grep -oE '[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}' || true)"
-    fi
+    domain="$(sudo head -1 /etc/caddy/Caddyfile 2>/dev/null | grep -oE '[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}' || true)"
 
     if [[ -n "$domain" ]]; then
       hub_url="wss://${domain}"
@@ -211,14 +162,7 @@ cmd_info() {
   echo "  Hub URL:      ${hub_url}"
   echo "  Auth Token:   ${auth_token}"
   echo "  Admin Token:  ${admin_token}"
-
-  if [[ "$INSTALL_MODE" == "multipass" ]]; then
-    echo "  VM IP:        ${hub_ip}"
-    echo "  Instance:     ${VM_NAME}"
-  else
-    echo "  Host IP:      ${hub_ip}"
-  fi
-
+  echo "  Host IP:      ${hub_ip}"
   echo
   hr
   echo "  How to connect from the browser:"
@@ -236,92 +180,67 @@ cmd_info() {
 cmd_uninstall() {
   echo
   warn "This will permanently remove the flo.monster hub installation."
-
-  if [[ "$INSTALL_MODE" == "multipass" ]]; then
-    echo
-    echo "  This will:"
-    echo "    - Delete the Multipass VM '$VM_NAME' and all its data"
-    echo "    - Remove /usr/local/bin/flo-admin"
-    echo
-    echo -n "Are you sure? Type 'yes' to confirm: "
-    local answer
-    read -r answer < /dev/tty
-    if [[ "$answer" != "yes" ]]; then
-      echo "Uninstall cancelled."
-      exit 0
-    fi
-
-    info "Deleting Multipass VM '$VM_NAME'..."
-    multipass delete "$VM_NAME" --purge
-    success "VM deleted"
-
-    info "Removing flo-admin CLI..."
-    sudo rm -f /usr/local/bin/flo-admin
-    success "flo-admin removed"
-
-  else
-    echo
-    echo "  This will:"
-    echo "    - Stop and disable the flo-hub systemd service"
-    echo "    - Remove the systemd unit file"
-    echo "    - Remove /usr/local/bin/flo-admin"
-    echo "    - Optionally remove the flo-hub user and all data"
-    echo
-    echo -n "Are you sure? Type 'yes' to confirm: "
-    local answer
-    read -r answer < /dev/tty
-    if [[ "$answer" != "yes" ]]; then
-      echo "Uninstall cancelled."
-      exit 0
-    fi
-
-    # Stop and disable systemd service
-    if systemctl is-active "$VM_NAME" >/dev/null 2>&1; then
-      info "Stopping flo-hub service..."
-      sudo systemctl stop "$VM_NAME"
-    fi
-    if systemctl is-enabled "$VM_NAME" >/dev/null 2>&1; then
-      info "Disabling flo-hub service..."
-      sudo systemctl disable "$VM_NAME"
-    fi
-    if [[ -f "/etc/systemd/system/${VM_NAME}.service" ]]; then
-      info "Removing systemd unit file..."
-      sudo rm "/etc/systemd/system/${VM_NAME}.service"
-      sudo systemctl daemon-reload
-    fi
-    success "Service removed"
-
-    # Ask about user and data removal
-    echo
-    echo -n "Also remove flo-hub user and all data (/home/flo-hub)? Type 'yes' to confirm: "
-    local remove_user
-    read -r remove_user < /dev/tty
-    if [[ "$remove_user" == "yes" ]]; then
-      info "Removing flo-hub user and home directory..."
-      sudo userdel -r "$HUB_USER" 2>/dev/null || true
-      success "User and data removed"
-
-      # Also remove flo-agent user if it exists
-      if id "flo-agent" >/dev/null 2>&1; then
-        info "Removing flo-agent user..."
-        sudo userdel "flo-agent" 2>/dev/null || true
-        success "flo-agent user removed"
-      fi
-
-      # Remove sudoers file
-      if [[ -f /etc/sudoers.d/flo-monster ]]; then
-        info "Removing sudoers rules..."
-        sudo rm -f /etc/sudoers.d/flo-monster
-        success "Sudoers rules removed"
-      fi
-    else
-      info "Keeping flo-hub user and data"
-    fi
-
-    info "Removing flo-admin CLI..."
-    sudo rm -f /usr/local/bin/flo-admin
-    success "flo-admin removed"
+  echo
+  echo "  This will:"
+  echo "    - Stop and disable the flo-hub systemd service"
+  echo "    - Remove the systemd unit file"
+  echo "    - Remove /usr/local/bin/flo-admin"
+  echo "    - Optionally remove the flo-hub user and all data"
+  echo
+  echo -n "Are you sure? Type 'yes' to confirm: "
+  local answer
+  read -r answer < /dev/tty
+  if [[ "$answer" != "yes" ]]; then
+    echo "Uninstall cancelled."
+    exit 0
   fi
+
+  # Stop and disable systemd service
+  if systemctl is-active "$SERVICE_NAME" >/dev/null 2>&1; then
+    info "Stopping flo-hub service..."
+    sudo systemctl stop "$SERVICE_NAME"
+  fi
+  if systemctl is-enabled "$SERVICE_NAME" >/dev/null 2>&1; then
+    info "Disabling flo-hub service..."
+    sudo systemctl disable "$SERVICE_NAME"
+  fi
+  if [[ -f "/etc/systemd/system/${SERVICE_NAME}.service" ]]; then
+    info "Removing systemd unit file..."
+    sudo rm "/etc/systemd/system/${SERVICE_NAME}.service"
+    sudo systemctl daemon-reload
+  fi
+  success "Service removed"
+
+  # Ask about user and data removal
+  echo
+  echo -n "Also remove flo-hub user and all data (/home/flo-hub)? Type 'yes' to confirm: "
+  local remove_user
+  read -r remove_user < /dev/tty
+  if [[ "$remove_user" == "yes" ]]; then
+    info "Removing flo-hub user and home directory..."
+    sudo userdel -r "$HUB_USER" 2>/dev/null || true
+    success "User and data removed"
+
+    # Also remove flo-agent user if it exists
+    if id "flo-agent" >/dev/null 2>&1; then
+      info "Removing flo-agent user..."
+      sudo userdel "flo-agent" 2>/dev/null || true
+      success "flo-agent user removed"
+    fi
+
+    # Remove sudoers file
+    if [[ -f /etc/sudoers.d/flo-monster ]]; then
+      info "Removing sudoers rules..."
+      sudo rm -f /etc/sudoers.d/flo-monster
+      success "Sudoers rules removed"
+    fi
+  else
+    info "Keeping flo-hub user and data"
+  fi
+
+  info "Removing flo-admin CLI..."
+  sudo rm -f /usr/local/bin/flo-admin
+  success "flo-admin removed"
 
   echo
   success "flo.monster hub has been uninstalled."
@@ -376,8 +295,8 @@ main() {
       ;;
   esac
 
-  # Detect installation mode before running any command
-  detect_mode
+  # Verify hub installation exists
+  check_install
 
   # Dispatch command
   case "$1" in

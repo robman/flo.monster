@@ -659,28 +659,18 @@ health_check_hub() {
 }
 
 # -----------------------------------------------------------------------------
-# install_flo_admin — Install the flo-admin CLI wrapper to /usr/local/bin
+# install_flo_admin — Install the flo-admin CLI to /usr/local/bin (direct mode)
 # -----------------------------------------------------------------------------
 install_flo_admin() {
-  local flo_admin_path="/usr/local/bin/flo-admin"
-
   info "Installing flo-admin CLI..."
-
-  # Try to get flo-admin.sh from local repo first, then download
-  local source_path="${SCRIPT_DIR}/flo-admin.sh"
+  local source_path="/home/flo-hub/flo.monster/scripts/flo-admin.sh"
   if [[ -f "$source_path" ]]; then
-    sudo cp "$source_path" "$flo_admin_path"
+    sudo cp "$source_path" /usr/local/bin/flo-admin
+    sudo chmod +x /usr/local/bin/flo-admin
+    success "flo-admin installed to /usr/local/bin/flo-admin"
   else
-    # Download from the same server as the installer
-    if ! curl -fsSL "${FLO_BASE_URL}/install/flo-admin.sh" -o /tmp/flo-admin.sh; then
-      warn "Could not download flo-admin CLI — you can install it manually later"
-      return 0
-    fi
-    sudo mv /tmp/flo-admin.sh "$flo_admin_path"
+    warn "Could not find flo-admin.sh at $source_path — install it manually later"
   fi
-
-  sudo chmod +x "$flo_admin_path"
-  success "flo-admin installed to $flo_admin_path"
 }
 
 # -----------------------------------------------------------------------------
@@ -766,9 +756,6 @@ run_multipass_install() {
       ADMIN_TOKEN="$vm_admin_token"
     fi
   fi
-
-  # Install flo-admin CLI on the host
-  install_flo_admin
 
   # Print results
   print_multipass_results "$vm_ip"
@@ -1160,16 +1147,18 @@ print_multipass_results() {
   echo "  Management:"
   hr
   echo
-  echo "  flo-admin status      Service status"
-  echo "  flo-admin logs        Tail hub logs"
-  echo "  flo-admin restart     Restart the hub"
-  echo "  flo-admin shell       Shell as flo-hub user"
-  echo "  flo-admin info        Show connection details"
-  echo "  flo-admin config      View configuration"
-  echo "  flo-admin uninstall   Remove the hub"
+  echo "  multipass exec ${INSTANCE_NAME} -- flo-admin status     Service status"
+  echo "  multipass exec ${INSTANCE_NAME} -- flo-admin logs       Tail hub logs"
+  echo "  multipass exec ${INSTANCE_NAME} -- flo-admin restart    Restart the hub"
+  echo "  multipass exec ${INSTANCE_NAME} -- flo-admin info       Show connection details"
   echo
-  hr
-  echo "  Documentation: https://flo.monster/docs/hub"
+  echo "  Or open a shell in the VM:"
+  echo
+  echo "  multipass shell ${INSTANCE_NAME}"
+  echo "  flo-admin status"
+  echo "  flo-admin logs"
+  echo "  flo-admin info"
+  echo
   hr
   echo
 }
