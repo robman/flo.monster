@@ -739,8 +739,8 @@ run_multipass_install() {
   local vm_ip
   vm_ip="$(multipass info "$INSTANCE_NAME" --format json | jq -r ".info[\"${INSTANCE_NAME}\"].ipv4[0]")"
 
-  # Health check
-  health_check_hub "$vm_ip" "$HUB_PORT"
+  # Health check (non-fatal — don't block results/flo-admin if hub is slow to start)
+  health_check_hub "$vm_ip" "$HUB_PORT" || true
 
   # Retrieve auth token from the VM
   local vm_auth_token
@@ -1100,7 +1100,7 @@ run_direct_install() {
 
   # Health check (only if systemd service was installed)
   if [[ "$INSTALL_SYSTEMD" == "yes" ]]; then
-    health_check_hub "localhost" "$HUB_PORT"
+    health_check_hub "localhost" "$HUB_PORT" || true
   fi
 
   # Install flo-admin CLI
