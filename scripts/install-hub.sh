@@ -729,9 +729,15 @@ run_multipass_install() {
   # Clean up cloud-init file immediately (contains auth token)
   rm -f "$cloud_init_file"
 
-  # Wait for cloud-init to complete
+  # Wait for cloud-init to complete (may return non-zero for non-critical errors)
   info "Waiting for cloud-init to finish..."
-  multipass exec "$INSTANCE_NAME" -- cloud-init status --wait
+  local cloud_init_status=0
+  multipass exec "$INSTANCE_NAME" -- cloud-init status --wait || cloud_init_status=$?
+
+  if [[ $cloud_init_status -ne 0 ]]; then
+    warn "cloud-init completed with warnings (exit code $cloud_init_status)"
+    echo "  Check cloud-init logs: multipass exec $INSTANCE_NAME -- sudo cat /var/log/cloud-init-output.log"
+  fi
 
   success "VM provisioned successfully"
 
