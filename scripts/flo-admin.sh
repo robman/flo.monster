@@ -86,7 +86,7 @@ redact_tokens() {
 # -----------------------------------------------------------------------------
 get_hub_ip() {
   if [[ "$INSTALL_MODE" == "multipass" ]]; then
-    multipass info "$VM_NAME" --format json 2>/dev/null | jq -r ".info[\"${VM_NAME}\"].ipv4[0]"
+    multipass info "$VM_NAME" 2>/dev/null | grep -i 'ipv4' | awk '{print $2}'
   else
     hostname -I 2>/dev/null | awk '{print $1}'
   fi
@@ -174,9 +174,10 @@ cmd_info() {
   }
 
   local auth_token admin_token hub_host hub_ip hub_url
-  auth_token="$(echo "$json" | jq -r '.authToken // empty')"
-  admin_token="$(echo "$json" | jq -r '.adminToken // empty')"
-  hub_host="$(echo "$json" | jq -r '.host // "0.0.0.0"')"
+  auth_token="$(echo "$json" | sed -n 's/.*"authToken"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+  admin_token="$(echo "$json" | sed -n 's/.*"adminToken"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+  hub_host="$(echo "$json" | sed -n 's/.*"host"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+  hub_host="${hub_host:-0.0.0.0}"
   hub_ip="$(get_hub_ip)"
 
   # Determine the hub URL

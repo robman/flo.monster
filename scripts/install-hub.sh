@@ -742,23 +742,29 @@ run_multipass_install() {
   success "VM provisioned successfully"
 
   # Get VM IP address (needed for health check)
+  # Use multipass info plain text to avoid jq dependency on macOS host
   local vm_ip
-  vm_ip="$(multipass info "$INSTANCE_NAME" --format json | jq -r ".info[\"${INSTANCE_NAME}\"].ipv4[0]")"
+  vm_ip="$(multipass info "$INSTANCE_NAME" | grep -i 'ipv4' | awk '{print $2}')"
 
   # Health check (non-fatal — don't block results/flo-admin if hub is slow to start)
   health_check_hub "$vm_ip" "$HUB_PORT" || true
 
-  # Retrieve auth token from the VM
-  local vm_auth_token
-  vm_auth_token="$(multipass exec "$INSTANCE_NAME" -- sudo cat /home/flo-hub/.flo-monster/hub.json | jq -r '.authToken')"
-  if [[ -n "$vm_auth_token" ]] && [[ "$vm_auth_token" != "null" ]]; then
-    AUTH_TOKEN="$vm_auth_token"
-  fi
+  # Retrieve tokens from hub.json in the VM (parse with grep/sed — no jq on macOS)
+  local vm_hub_json
+  vm_hub_json="$(multipass exec "$INSTANCE_NAME" -- sudo cat /home/flo-hub/.flo-monster/hub.json 2>/dev/null)" || true
 
-  local vm_admin_token
-  vm_admin_token="$(multipass exec "$INSTANCE_NAME" -- sudo cat /home/flo-hub/.flo-monster/hub.json | jq -r '.adminToken')"
-  if [[ -n "$vm_admin_token" ]] && [[ "$vm_admin_token" != "null" ]]; then
-    ADMIN_TOKEN="$vm_admin_token"
+  if [[ -n "$vm_hub_json" ]]; then
+    local vm_auth_token
+    vm_auth_token="$(echo "$vm_hub_json" | sed -n 's/.*"authToken"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+    if [[ -n "$vm_auth_token" ]]; then
+      AUTH_TOKEN="$vm_auth_token"
+    fi
+
+    local vm_admin_token
+    vm_admin_token="$(echo "$vm_hub_json" | sed -n 's/.*"adminToken"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+    if [[ -n "$vm_admin_token" ]]; then
+      ADMIN_TOKEN="$vm_admin_token"
+    fi
   fi
 
   # Install flo-admin CLI on the host
