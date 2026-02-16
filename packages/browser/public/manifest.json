@@ -1,0 +1,42 @@
+{
+  "name": "flo.monster — AI that lives in the web",
+  "short_name": "flo.monster",
+  "id": "/",
+  "description": "AI that lives in the web — agents that inhabit living web pages, see what you see, and respond in real time.",
+  "start_url": "/",
+  "display": "standalone",
+  "theme_color": "#4fc3f7",
+  "background_color": "#1a1a2e",
+  "icons": [
+    {
+      "src": "/icons/icon-180.png",
+      "sizes": "180x180",
+      "type": "image/png"
+    },
+    {
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ],
+  "screenshots": [
+    {
+      "src": "/icons/screenshot-wide.png",
+      "sizes": "1280x720",
+      "type": "image/png",
+      "form_factor": "wide",
+      "label": "flo.monster desktop view"
+    },
+    {
+      "src": "/icons/screenshot-mobile.png",
+      "sizes": "390x844",
+      "type": "image/png",
+      "label": "flo.monster mobile view"
+    }
+  ]
+}

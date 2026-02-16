@@ -1,0 +1,26 @@
+{
+  "name": "@flo-monster/browser",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build && node scripts/build-sw.js",
+    "preview": "vite preview --port 4173",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@flo-monster/core": "workspace:*",
+    "jszip": "^3.10.1",
+    "yaml": "^2.8.2"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-basic-ssl": "^2.1.4",
+    "fake-indexeddb": "^6.2.5",
+    "jsdom": "^26.0.0",
+    "typescript": "^5.7.0",
+    "vite": "^6.0.0",
+    "esbuild": "^0.24.0",
+    "vitest": "^3.0.0"
+  }
+}

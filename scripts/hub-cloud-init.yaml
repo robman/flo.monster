@@ -1,0 +1,161 @@
+#cloud-config
+# flo.monster Hub — Cloud-Init Configuration
+#
+# This template is used by install-hub.sh for Multipass VM provisioning.
+# Placeholders ({{...}}) are replaced at install time via sed before
+# being passed to `multipass launch --cloud-init`.
+#
+# Placeholders:
+#   {{AUTH_TOKEN}}     — Generated auth token for hub API access
+#   {{VAPID_EMAIL}}    — Email address for VAPID/push notifications
+#   {{HUB_HOST}}       — Bind address: "127.0.0.1" (local) or "0.0.0.0" (all interfaces)
+#   {{TRUST_PROXY}}    — "true" or "false" (behind reverse proxy)
+#   {{DOMAIN}}         — Domain name for TLS (empty if local-only)
+#   {{SETUP_CADDY}}    — "true" or "false" (install/enable Caddy reverse proxy)
+#   {{SETUP_SYSTEMD}}  — "true" or "false" (enable systemd service)
+#   {{FLO_REPO_URL}}   — Git clone URL for the flo.monster repository
+#
+# Security notes:
+# - The auth token is present in this file. Mitigated by:
+#   (1) Host-side temp file uses umask 077 and is deleted after launch
+#   (2) Inside VM, /var/lib/cloud/instance/user-data.txt is root-only readable
+
+users:
+  - name: flo-hub
+    shell: /bin/bash
+    groups: sudo
+    sudo: ['ALL=(ALL) NOPASSWD:ALL']  # Needed during setup only; removed in runcmd
+    lock_passwd: true
+  - name: flo-agent
+    system: true
+    shell: /usr/sbin/nologin
+    no_create_home: true
+
+write_files:
+  # Sudoers: allow flo-hub to run commands as flo-agent (for agent sandboxing)
+  - path: /etc/sudoers.d/flo-monster
+    content: |
+      flo-hub ALL=(flo-agent) NOPASSWD: ALL
+    permissions: '0440'
+
+  # Node.js environment loader (sourced by .bashrc and systemd service)
+  - path: /home/flo-hub/setup-env.sh
+    owner: flo-hub:flo-hub
+    permissions: '0755'
+    content: |
+      #!/usr/bin/env bash
+      export NVM_DIR="/home/flo-hub/.nvm"
+      [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+      nvm use 22 >/dev/null 2>&1
+
+  # Hub configuration
+  - path: /home/flo-hub/.flo-monster/hub.json
+    owner: flo-hub:flo-hub
+    permissions: '0600'
+    content: |
+      {
+        "host": "{{HUB_HOST}}",
+        "port": 8765,
+        "localhostBypassAuth": false,
+        "authToken": "{{AUTH_TOKEN}}",
+        "trustProxy": {{TRUST_PROXY}},
+        "tools": {
+          "bash": {
+            "runAsUser": "flo-agent",
+            "mode": "restricted"
+          }
+        },
+        "pushConfig": {
+          "enabled": true,
+          "vapidEmail": "{{VAPID_EMAIL}}"
+        }
+      }
+
+  # Systemd service unit (conditionally enabled in runcmd)
+  - path: /etc/systemd/system/flo-hub.service
+    content: |
+      [Unit]
+      Description=flo.monster Hub Server
+      After=network.target
+
+      [Service]
+      Type=simple
+      User=flo-hub
+      WorkingDirectory=/home/flo-hub/flo.monster/packages/hub
+      ExecStart=/bin/bash -c 'source /home/flo-hub/setup-env.sh && exec node ../../node_modules/.bin/tsx src/index.ts'
+      Restart=always
+      RestartSec=5
+      PrivateTmp=true
+
+      [Install]
+      WantedBy=multi-user.target
+
+  # Caddy reverse proxy config (conditionally enabled in runcmd)
+  - path: /etc/caddy/Caddyfile
+    content: |
+      {{DOMAIN}} {
+        reverse_proxy localhost:8765
+        tls {{VAPID_EMAIL}}
+      }
+
+      {{DOMAIN}}:8766 {
+        reverse_proxy localhost:8766
+        tls {{VAPID_EMAIL}}
+      }
+
+package_update: true
+
+packages:
+  - git
+  - curl
+  - build-essential
+  - jq
+
+runcmd:
+  # Set home directory permissions
+  - chmod 750 /home/flo-hub
+
+  # Create .flo-monster directory structure
+  - mkdir -p /home/flo-hub/.flo-monster/agents
+  - mkdir -p /home/flo-hub/.flo-monster/sandbox
+  - chown -R flo-hub:flo-hub /home/flo-hub/.flo-monster
+  - chmod 755 /home/flo-hub/.flo-monster/sandbox
+
+  # Source setup-env.sh from .bashrc for interactive shells
+  - su - flo-hub -c 'echo "source ~/setup-env.sh" >> ~/.bashrc'
+
+  # Install nvm and Node.js 22
+  - su - flo-hub -c 'curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash'
+  - su - flo-hub -c 'source ~/.nvm/nvm.sh && nvm install 22 && nvm alias default 22'
+
+  # Enable corepack and prepare pnpm
+  - su - flo-hub -c 'source ~/setup-env.sh && corepack enable && corepack prepare pnpm@latest --activate'
+
+  # Clone repo and install dependencies
+  - su - flo-hub -c 'git clone {{FLO_REPO_URL}} /home/flo-hub/flo.monster'
+  - su - flo-hub -c 'source ~/setup-env.sh && cd /home/flo-hub/flo.monster && pnpm install --frozen-lockfile'
+
+  # Conditional: Install and configure Caddy reverse proxy
+  - |
+    if [ "{{SETUP_CADDY}}" = "true" ]; then
+      apt-get install -y debian-keyring debian-archive-keyring apt-transport-https
+      curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+      curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list
+      apt-get update
+      apt-get install -y caddy
+      systemctl enable caddy
+      systemctl start caddy
+    fi
+
+  # Conditional: Enable and start systemd service
+  - |
+    if [ "{{SETUP_SYSTEMD}}" = "true" ]; then
+      systemctl daemon-reload
+      systemctl enable flo-hub
+      systemctl start flo-hub
+    fi
+
+  # Remove broad sudo access for flo-hub now that setup is complete.
+  # Only the flo-agent sudoers rule in /etc/sudoers.d/flo-monster remains.
+  - sed -i '/flo-hub.*NOPASSWD.*ALL.*ALL/d' /etc/sudoers.d/90-cloud-init-users 2>/dev/null || true
+  - 'echo "flo-hub ALL=(flo-agent) NOPASSWD: ALL" > /etc/sudoers.d/flo-monster'

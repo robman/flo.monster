@@ -1,0 +1,63 @@
+import type { ProviderAdapter, ModelInfo } from '../types/provider.js';
+import { createAnthropicAdapter, MODEL_INFO as ANTHROPIC_MODELS } from './anthropic.js';
+import { createOpenAIChatAdapter, OPENAI_MODELS, GEMINI_MODELS } from './openai.js';
+
+/**
+ * Combined model registry across all providers.
+ */
+export const ALL_MODELS: Record<string, ModelInfo> = {
+  ...ANTHROPIC_MODELS,
+  ...OPENAI_MODELS,
+  ...GEMINI_MODELS,
+};
+
+/**
+ * Get all models for a specific provider.
+ */
+export function getModelsForProvider(provider: string): ModelInfo[] {
+  return Object.values(ALL_MODELS).filter(m => m.provider === provider);
+}
+
+/**
+ * Get a model by its ID.
+ */
+export function getModelInfo(modelId: string): ModelInfo | undefined {
+  return ALL_MODELS[modelId];
+}
+
+/**
+ * Get the provider for a model ID.
+ * Returns 'anthropic' for unknown models (backward compatibility).
+ */
+export function getProviderForModel(modelId: string): string {
+  const model = ALL_MODELS[modelId];
+  return model?.provider || 'anthropic';
+}
+
+/**
+ * Get the correct adapter for a given provider.
+ */
+export function getAdapter(provider: string): ProviderAdapter {
+  switch (provider) {
+    case 'openai':
+    case 'gemini':
+    case 'ollama':
+      return createOpenAIChatAdapter();
+    case 'anthropic':
+    default:
+      return createAnthropicAdapter();
+  }
+}
+
+/**
+ * Get all available provider IDs.
+ */
+export function getAvailableProviders(): string[] {
+  const providers = new Set<string>();
+  for (const model of Object.values(ALL_MODELS)) {
+    providers.add(model.provider);
+  }
+  // Ollama is always available (models are user-installed, not in registry)
+  providers.add('ollama');
+  return Array.from(providers);
+}

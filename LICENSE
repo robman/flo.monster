@@ -1,0 +1,22 @@
+# flo.monster Licensing
+
+This project uses a dual-license model:
+
+## packages/browser — Business Source License 1.1
+
+The browser package (`packages/browser`) is licensed under the Business
+Source License 1.1. This means you can view, modify, and use the code for
+non-production purposes. Production use requires a commercial license from
+the licensor until the Change Date (2030-02-16), after which the code
+converts to AGPL-3.0.
+
+See `packages/browser/LICENSE` for the full text.
+
+## packages/core, packages/hub, packages/proxy — AGPL-3.0
+
+All other packages are licensed under the GNU Affero General Public License
+v3.0. You are free to use, modify, and distribute these packages under the
+terms of the AGPL-3.0.
+
+See `packages/core/LICENSE`, `packages/hub/LICENSE`, or
+`packages/proxy/LICENSE` for the full text.

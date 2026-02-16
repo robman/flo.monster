@@ -1,0 +1,773 @@
+/**
+ * Message handling: routing, tool calls, fetch proxy, auth, audit logging.
+ */
+
+import type { HubConfig } from '../config.js';
+import { validateToken } from '../auth.js';
+import { getToolDefinitions, executeTool } from '../tools/index.js';
+import type { ToolInput } from '../tools/index.js';
+import type { HookExecutor } from '../hook-executor.js';
+import type { HubSkillManager } from '../skill-manager.js';
+import type { AgentStore } from '../agent-store.js';
+import type { HeadlessAgentRunner } from '../agent-runner.js';
+import type { ConnectedClient } from '../server.js';
+import type { BrowserToolRouter } from '../browser-tool-router.js';
+import type { Scheduler } from '../scheduler.js';
+import type { PushManager } from '../push-manager.js';
+import { sendWsMessage } from '../utils/ws-utils.js';
+import {
+  handlePersistAgent,
+  handleSubscribeAgent,
+  handleUnsubscribeAgent,
+  handleAgentAction,
+  handleSendMessage,
+  handleRestoreAgent,
+  handleListHubAgents,
+  handleDomStateUpdate,
+  handleStateWriteThrough,
+} from './agent-handler.js';
+import type {
+  HubMessage,
+  AuthMessage,
+  ToolCallMessage,
+  ToolResultMessage,
+  FetchRequestMessage,
+  FetchResultMessage,
+  ErrorMessage,
+  SubscribeAgentMessage,
+  UnsubscribeAgentMessage,
+  AgentActionMessage,
+  SendMessageToAgentMessage,
+  RestoreAgentMessage,
+  PersistAgentMessage,
+  ApiProxyRequestMessage,
+} from './types.js';
+import { getProviderRoute } from '../http-server.js';
+
+// ============================================================================
+// Audit logging
+// ============================================================================
+
+interface AuditLogEntry {
+  timestamp: string;
+  event: 'tool_request' | 'tool_result' | 'auth_attempt' | 'connection';
+  clientIp?: string;
+  toolName?: string;
+  success?: boolean;
+  error?: string;
+  details?: Record<string, unknown>;
+}
+
+function auditLog(entry: AuditLogEntry): void {
+  // Structured log in JSON format for easy parsing
+  console.log(JSON.stringify({
+    audit: true,
+    ...entry,
+  }));
+}
+
+// ============================================================================
+// Pending skill approvals
+// ============================================================================
+
+interface PendingApproval {
+  resolve: (approved: boolean) => void;
+  reject: (error: Error) => void;
+  timeout: ReturnType<typeof setTimeout>;
+}
+
+const pendingApprovals = new Map<string, PendingApproval>();
+
+/**
+ * Request skill approval from a connected browser client
+ */
+export async function requestSkillApproval(
+  clients: Set<ConnectedClient>,
+  skill: { name: string; description: string; content: string },
+  timeoutMs: number = 60000,
+): Promise<boolean> {
+  // Find first authenticated client
+  const client = Array.from(clients).find(c => c.authenticated);
+  if (!client) {
+    throw new Error('No browser connected for skill approval');
+  }
+
+  const id = `approval-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      pendingApprovals.delete(id);
+      reject(new Error('Skill approval request timed out'));
+    }, timeoutMs);
+
+    pendingApprovals.set(id, { resolve, reject, timeout });
+
+    sendWsMessage(client.ws, {
+      type: 'skill_approval_request',
+      id,
+      skill,
+    });
+  });
+}
+
+// ============================================================================
+// Tool call handler
+// ============================================================================
+
+/**
+ * Handle a tool call message
+ */
+async function handleToolCall(
+  client: ConnectedClient,
+  message: ToolCallMessage,
+  config: HubConfig,
+  clients: Set<ConnectedClient>,
+  hookExecutor?: HookExecutor,
+  skillManager?: HubSkillManager,
+): Promise<void> {
+  auditLog({
+    timestamp: new Date().toISOString(),
+    event: 'tool_request',
+    clientIp: client.remoteAddress,
+    toolName: message.name,
+    details: { id: message.id },
+  });
+
+  // Create approval function that routes through connected clients
+  const approvalFn = (skill: { name: string; description: string; content: string }) =>
+    requestSkillApproval(clients, skill);
+
+  const result = await executeTool(message.name, message.input as ToolInput, config, hookExecutor, skillManager, approvalFn);
+
+  auditLog({
+    timestamp: new Date().toISOString(),
+    event: 'tool_result',
+    clientIp: client.remoteAddress,
+    toolName: message.name,
+    success: !result.is_error,
+    error: result.is_error ? result.content.substring(0, 200) : undefined,
+    details: { id: message.id },
+  });
+
+  const response: ToolResultMessage = {
+    type: 'tool_result',
+    id: message.id,
+    result,
+  };
+
+  sendWsMessage(client.ws, response);
+}
+
+// ============================================================================
+// Fetch proxy handler
+// ============================================================================
+
+/**
+ * Check if a hostname resolves to a private/internal IP range.
+ * Used to prevent SSRF via redirect to internal services.
+ */
+function isPrivateIP(hostname: string): boolean {
+  // Strip IPv6 brackets if present (URL.hostname returns [::1] for IPv6)
+  const h = hostname.startsWith('[') && hostname.endsWith(']')
+    ? hostname.slice(1, -1)
+    : hostname;
+  // Check common private IP patterns
+  if (h === 'localhost' || h === '127.0.0.1' || h === '::1') return true;
+  if (h.startsWith('127.')) return true;
+  if (h.startsWith('10.')) return true;
+  if (h.startsWith('192.168.')) return true;
+  if (h.startsWith('0.')) return true;
+  if (h === '0.0.0.0') return true;
+  // 172.16.0.0 - 172.31.255.255
+  if (h.startsWith('172.')) {
+    const second = parseInt(h.split('.')[1], 10);
+    if (second >= 16 && second <= 31) return true;
+  }
+  // Link-local
+  if (h.startsWith('169.254.')) return true;
+  // IPv6
+  if (h.startsWith('fe80:') || h.startsWith('fc') || h.startsWith('fd')) return true;
+  return false;
+}
+
+/**
+ * Handle a fetch request (proxy)
+ */
+async function handleFetchRequest(
+  client: ConnectedClient,
+  message: FetchRequestMessage,
+  config: HubConfig
+): Promise<void> {
+  try {
+    // Check if fetch proxy is enabled
+    if (!config.fetchProxy.enabled) {
+      const response: FetchResultMessage = {
+        type: 'fetch_result',
+        id: message.id,
+        status: 0,
+        body: '',
+        error: 'Fetch proxy is disabled',
+      };
+      sendWsMessage(client.ws, response);
+      return;
+    }
+
+    // Check URL against allowed/blocked patterns
+    const url = message.url;
+    const isBlocked = config.fetchProxy.blockedPatterns.some(pattern => {
+      const regex = new RegExp('^' + pattern.replace(/\*/g, '.*') + '$');
+      return regex.test(url) || regex.test(new URL(url).hostname);
+    });
+
+    if (isBlocked) {
+      const response: FetchResultMessage = {
+        type: 'fetch_result',
+        id: message.id,
+        status: 0,
+        body: '',
+        error: 'URL is blocked by fetch proxy policy',
+      };
+      sendWsMessage(client.ws, response);
+      return;
+    }
+
+    // Perform the fetch
+    const fetchOptions: RequestInit = {
+      method: message.options?.method || 'GET',
+      headers: message.options?.headers,
+      body: message.options?.body,
+    };
+
+    // Strip sensitive headers from agent fetch requests (H-H1)
+    const sensitiveHeaders = ['authorization', 'cookie', 'x-api-key', 'proxy-authorization', 'set-cookie'];
+    if (fetchOptions.headers) {
+      const headers = new Headers(fetchOptions.headers as HeadersInit);
+      for (const header of sensitiveHeaders) {
+        headers.delete(header);
+      }
+      fetchOptions.headers = Object.fromEntries(headers.entries());
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30000);
+
+    try {
+      // Follow redirects manually to validate each hop (H-H2)
+      let currentUrl = url;
+      let fetchResponse: Response | undefined;
+      const maxRedirects = 5;
+
+      for (let i = 0; i <= maxRedirects; i++) {
+        fetchResponse = await fetch(currentUrl, {
+          ...fetchOptions,
+          signal: controller.signal,
+          redirect: 'manual',
+        });
+
+        // Check if this is a redirect
+        const status = fetchResponse.status;
+        if (status >= 300 && status < 400) {
+          const location = fetchResponse.headers.get('location');
+          if (!location) break;
+
+          // Resolve relative redirects
+          const redirectUrl = new URL(location, currentUrl).href;
+
+          // Validate redirect target against blocked patterns
+          const isRedirectBlocked = config.fetchProxy.blockedPatterns.some(pattern => {
+            const regex = new RegExp('^' + pattern.replace(/\*/g, '.*') + '$');
+            return regex.test(redirectUrl) || regex.test(new URL(redirectUrl).hostname);
+          });
+
+          if (isRedirectBlocked) {
+            clearTimeout(timeout);
+            const response: FetchResultMessage = {
+              type: 'fetch_result',
+              id: message.id,
+              status: 0,
+              body: '',
+              error: 'Redirect target blocked by fetch proxy policy',
+            };
+            sendWsMessage(client.ws, response);
+            return;
+          }
+
+          // Check redirect for private/internal IPs
+          try {
+            const redirectHostname = new URL(redirectUrl).hostname;
+            if (isPrivateIP(redirectHostname)) {
+              clearTimeout(timeout);
+              const response: FetchResultMessage = {
+                type: 'fetch_result',
+                id: message.id,
+                status: 0,
+                body: '',
+                error: 'Redirect to private IP blocked',
+              };
+              sendWsMessage(client.ws, response);
+              return;
+            }
+          } catch {
+            // Invalid URL — block
+            clearTimeout(timeout);
+            const response: FetchResultMessage = {
+              type: 'fetch_result',
+              id: message.id,
+              status: 0,
+              body: '',
+              error: 'Invalid redirect URL',
+            };
+            sendWsMessage(client.ws, response);
+            return;
+          }
+
+          currentUrl = redirectUrl;
+          // Don't send body on redirects (POST->GET)
+          fetchOptions.body = undefined;
+          continue;
+        }
+
+        // Not a redirect — we have the final response
+        break;
+      }
+
+      clearTimeout(timeout);
+
+      const body = await fetchResponse!.text();
+
+      const response: FetchResultMessage = {
+        type: 'fetch_result',
+        id: message.id,
+        status: fetchResponse!.status,
+        body,
+      };
+      sendWsMessage(client.ws, response);
+    } catch (fetchError) {
+      clearTimeout(timeout);
+      const response: FetchResultMessage = {
+        type: 'fetch_result',
+        id: message.id,
+        status: 0,
+        body: '',
+        error: `Fetch failed: ${(fetchError as Error).message}`,
+      };
+      sendWsMessage(client.ws, response);
+    }
+  } catch (error) {
+    const response: FetchResultMessage = {
+      type: 'fetch_result',
+      id: message.id,
+      status: 0,
+      body: '',
+      error: `Fetch proxy error: ${(error as Error).message}`,
+    };
+    sendWsMessage(client.ws, response);
+  }
+}
+
+// ============================================================================
+// API proxy handler (Mode 3: browser routes API through hub WS)
+// ============================================================================
+
+/**
+ * Handle an API proxy request from browser.
+ * Proxies API calls through hub's shared keys, streaming response chunks
+ * back over the WebSocket connection.
+ */
+async function handleApiProxyRequest(
+  client: ConnectedClient,
+  message: ApiProxyRequestMessage,
+  config: HubConfig,
+): Promise<void> {
+  try {
+    // 1. Resolve provider route from path
+    const route = getProviderRoute(message.path, config);
+    console.log(`[hub] api_proxy: route=${route ? `${route.provider} → ${route.upstreamUrl}` : 'null'}`);
+    if (!route) {
+      sendWsMessage(client.ws, {
+        type: 'api_error',
+        id: message.id,
+        error: 'Unknown provider path',
+      });
+      return;
+    }
+
+    // 2. CLI proxy not supported over WebSocket (needs HTTP streaming)
+    if (config.cliProviders?.[route.provider]) {
+      sendWsMessage(client.ws, {
+        type: 'api_error',
+        id: message.id,
+        error: 'CLI proxy not supported via WebSocket',
+      });
+      return;
+    }
+
+    // 3. Look up API key
+    let apiKey = config.sharedApiKeys?.[route.provider];
+    if (!apiKey && config.providers?.[route.provider]) {
+      apiKey = config.providers[route.provider].apiKey;
+    }
+
+    if (!apiKey && route.provider !== 'ollama') {
+      sendWsMessage(client.ws, {
+        type: 'api_error',
+        id: message.id,
+        error: `No shared API key configured for provider: ${route.provider}`,
+      });
+      return;
+    }
+
+    // 4. Build upstream headers
+    const upstreamHeaders: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+
+    if (route.provider === 'anthropic') {
+      if (apiKey) upstreamHeaders['x-api-key'] = apiKey;
+      upstreamHeaders['anthropic-version'] = '2023-06-01';
+    } else if (apiKey) {
+      upstreamHeaders['Authorization'] = `Bearer ${apiKey}`;
+    }
+
+    // 5. Fetch from upstream
+    const response = await fetch(route.upstreamUrl, {
+      method: 'POST',
+      headers: upstreamHeaders,
+      body: JSON.stringify(message.payload),
+    });
+
+    if (!response.ok) {
+      sendWsMessage(client.ws, {
+        type: 'api_error',
+        id: message.id,
+        error: `${response.status} ${response.statusText}`,
+      });
+      return;
+    }
+
+    // 6. Stream response body back over WebSocket
+    if (response.body) {
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          const chunk = decoder.decode(value, { stream: true });
+          sendWsMessage(client.ws, {
+            type: 'api_stream_chunk',
+            id: message.id,
+            chunk,
+          });
+        }
+      } catch (streamError) {
+        sendWsMessage(client.ws, {
+          type: 'api_error',
+          id: message.id,
+          error: `Stream error: ${(streamError as Error).message}`,
+        });
+        return;
+      }
+    }
+
+    sendWsMessage(client.ws, {
+      type: 'api_stream_end',
+      id: message.id,
+    });
+  } catch (error) {
+    sendWsMessage(client.ws, {
+      type: 'api_error',
+      id: message.id,
+      error: `API proxy error: ${(error as Error).message}`,
+    });
+  }
+}
+
+// ============================================================================
+// Main message router
+// ============================================================================
+
+/**
+ * Handle incoming message from a client
+ */
+export async function handleMessage(
+  client: ConnectedClient,
+  message: HubMessage,
+  config: HubConfig,
+  agents: Map<string, HeadlessAgentRunner>,
+  clients: Set<ConnectedClient>,
+  hookExecutor?: HookExecutor,
+  skillManager?: HubSkillManager,
+  agentStore?: AgentStore,
+  browserToolRouter?: BrowserToolRouter,
+  agentStorePath?: string,
+  scheduler?: Scheduler,
+  pushManager?: PushManager,
+): Promise<void> {
+  // Handle authentication
+  if (message.type === 'auth') {
+    const authMessage = message as AuthMessage;
+    console.log(`[hub] Auth attempt from ${client.remoteAddress}, token provided: ${!!authMessage.token}`);
+    const valid = validateToken(authMessage.token, config, client.remoteAddress);
+    console.log(`[hub] Auth result: ${valid ? 'valid' : 'invalid'}`);
+
+    auditLog({
+      timestamp: new Date().toISOString(),
+      event: 'auth_attempt',
+      clientIp: client.remoteAddress,
+      success: valid,
+    });
+
+    if (valid) {
+      client.authenticated = true;
+
+      // Generate a hub ID from config
+      const hubId = config.name.toLowerCase().replace(/\s+/g, '-') + '-' + config.port;
+
+      // Build the HTTP API URL (use publicHost if set, for TLS cert hostname matching)
+      const httpHost = config.publicHost || config.host;
+      const httpApiUrl = config.tls
+        ? `https://${httpHost}:${config.port}`
+        : `http://${httpHost}:${config.port}`;
+
+      // Send auth_result first
+      const authResult = {
+        type: 'auth_result',
+        success: true,
+        hubId,
+        hubName: config.name,
+        sharedProviders: [
+          ...Object.keys(config.sharedApiKeys || {}),
+          ...Object.keys(config.cliProviders || {}),
+        ],
+        httpApiUrl,
+      };
+      console.log(`[hub] Sending auth_result success`);
+      sendWsMessage(client.ws, authResult);
+
+      // Then announce available tools
+      const tools = getToolDefinitions(config);
+      const announceTools = {
+        type: 'announce_tools',
+        tools,
+      };
+      console.log(`[hub] Sending announce_tools with ${tools.length} tools`);
+      sendWsMessage(client.ws, announceTools);
+
+      // Send VAPID public key if push is enabled
+      if (pushManager?.isEnabled) {
+        const vapidKey = pushManager.getVapidPublicKey();
+        if (vapidKey) {
+          sendWsMessage(client.ws, {
+            type: 'vapid_public_key',
+            key: vapidKey,
+          });
+        }
+      }
+    } else {
+      const authResult = {
+        type: 'auth_result',
+        success: false,
+        hubId: '',
+        hubName: '',
+        error: 'Authentication failed',
+      };
+      console.log(`[hub] Sending auth_result failure`);
+      sendWsMessage(client.ws, authResult);
+      client.ws.close(4001, 'Authentication failed');
+    }
+    return;
+  }
+
+  // All other messages require authentication
+  if (!client.authenticated) {
+    const error: ErrorMessage = {
+      type: 'error',
+      id: message.id,
+      message: 'Not authenticated',
+    };
+    sendWsMessage(client.ws, error);
+    return;
+  }
+
+  // Handle skill_approval_response
+  if (message.type === 'skill_approval_response') {
+    const { id, approved } = message as { type: string; id: string; approved: boolean };
+    const pending = pendingApprovals.get(id);
+    if (pending) {
+      clearTimeout(pending.timeout);
+      pendingApprovals.delete(id);
+      pending.resolve(approved);
+    }
+    return;
+  }
+
+  // Handle browser_tool_result
+  if (message.type === 'browser_tool_result') {
+    if (browserToolRouter) {
+      const { id, result } = message as { type: string; id: string; result: { content: string; is_error?: boolean } };
+      browserToolRouter.handleResult(id, result);
+    }
+    return;
+  }
+
+  // Handle tool requests
+  if (message.type === 'tool_request') {
+    await handleToolCall(client, message as ToolCallMessage, config, clients, hookExecutor, skillManager);
+    return;
+  }
+
+  // Handle fetch requests (proxy)
+  if (message.type === 'fetch_request') {
+    await handleFetchRequest(client, message as unknown as FetchRequestMessage, config);
+    return;
+  }
+
+  // Handle persist_agent
+  if (message.type === 'persist_agent') {
+    const persistMsg = message as unknown as PersistAgentMessage;
+    await handlePersistAgent(client, persistMsg, agents, clients, {
+      hubConfig: config,
+      hookExecutor,
+      skillManager,
+      agentStore,
+      agentStorePath,
+      clients,
+      browserToolRouter,
+      scheduler,
+      pushManager,
+    });
+    return;
+  }
+
+  // Handle subscribe_agent
+  if (message.type === 'subscribe_agent') {
+    const subMsg = message as SubscribeAgentMessage;
+    handleSubscribeAgent(client, subMsg, agents);
+    return;
+  }
+
+  // Handle unsubscribe_agent
+  if (message.type === 'unsubscribe_agent') {
+    const unsubMsg = message as UnsubscribeAgentMessage;
+    handleUnsubscribeAgent(client, unsubMsg);
+    return;
+  }
+
+  // Handle agent_action
+  if (message.type === 'agent_action') {
+    const actionMsg = message as AgentActionMessage;
+    handleAgentAction(client, actionMsg, agents, agentStore);
+    browserToolRouter?.setLastActiveClient(actionMsg.agentId, client);
+    return;
+  }
+
+  // Handle send_message
+  if (message.type === 'send_message') {
+    const sendMsg = message as SendMessageToAgentMessage;
+    handleSendMessage(client, sendMsg, agents);
+    browserToolRouter?.setLastActiveClient(sendMsg.agentId, client);
+    return;
+  }
+
+  // Handle restore_agent
+  if (message.type === 'restore_agent') {
+    const restoreMsg = message as RestoreAgentMessage;
+    handleRestoreAgent(client, restoreMsg, agents);
+    return;
+  }
+
+  // Handle list_hub_agents
+  if (message.type === 'list_hub_agents') {
+    handleListHubAgents(client, agents);
+    return;
+  }
+
+  // Handle dom_state_update
+  if (message.type === 'dom_state_update') {
+    handleDomStateUpdate(client, message as any, agents, agentStore, clients);
+    return;
+  }
+
+  // Handle state_write_through
+  if (message.type === 'state_write_through') {
+    handleStateWriteThrough(client, message as any, agents, clients, agentStore);
+    return;
+  }
+
+  // Handle push_subscribe
+  if (message.type === 'push_subscribe') {
+    console.log('[hub] push_subscribe handler, pushManager available:', !!pushManager);
+    if (pushManager) {
+      const { deviceId, subscription } = message as { type: string; deviceId: string; subscription: { endpoint: string; keys: { p256dh: string; auth: string } } };
+      const result = await pushManager.subscribe(deviceId, subscription);
+      console.log('[hub] push_subscribe result:', JSON.stringify(result));
+      if ('error' in result) {
+        sendWsMessage(client.ws, {
+          type: 'push_subscribe_result',
+          deviceId,
+          success: false,
+          error: result.error,
+        });
+      } else {
+        sendWsMessage(client.ws, {
+          type: 'push_subscribe_result',
+          deviceId,
+          success: true,
+        });
+      }
+    } else {
+      console.log('[hub] push_subscribe: no pushManager available');
+    }
+    return;
+  }
+
+  // Handle push_verify_pin
+  if (message.type === 'push_verify_pin') {
+    if (pushManager) {
+      const { deviceId, pin } = message as { type: string; deviceId: string; pin: string };
+      const verified = await pushManager.verifyPin(deviceId, pin);
+      sendWsMessage(client.ws, {
+        type: 'push_verify_result',
+        deviceId,
+        verified,
+      });
+    }
+    return;
+  }
+
+  // Handle push_unsubscribe
+  if (message.type === 'push_unsubscribe') {
+    if (pushManager) {
+      const { deviceId } = message as { type: string; deviceId: string };
+      await pushManager.unsubscribe(deviceId);
+    }
+    return;
+  }
+
+  // Handle visibility_state
+  if (message.type === 'visibility_state') {
+    if (pushManager) {
+      const { deviceId, visible } = message as { type: string; deviceId: string; visible: boolean };
+      pushManager.setDeviceVisibility(deviceId, visible);
+    }
+    return;
+  }
+
+  // Handle API proxy request (Mode 3: browser routes API through hub WS)
+  if (message.type === 'api_proxy_request') {
+    console.log(`[hub] api_proxy_request from ${client.remoteAddress}: provider=${(message as any).provider} path=${(message as any).path}`);
+    await handleApiProxyRequest(client, message as unknown as ApiProxyRequestMessage, config);
+    return;
+  }
+
+  // Unknown message type
+  const error: ErrorMessage = {
+    type: 'error',
+    id: message.id,
+    message: `Unknown message type: ${message.type}`,
+  };
+  sendWsMessage(client.ws, error);
+}

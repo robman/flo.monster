@@ -1,0 +1,8 @@
+node_modules/
+dist/
+*.tsbuildinfo
+package-lock.json
+packages/browser/certs/
+tmp/*
+.env
+scripts/aws/config.env

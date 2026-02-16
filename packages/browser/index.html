@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <link rel="manifest" href="/manifest.json">
+  <meta name="theme-color" content="#ffffff">
+  <link rel="icon" href="/favicon.ico">
+  <link rel="apple-touch-icon" href="/icons/icon-180.png">
+  <title>flo.monster</title>
+  <meta name="description" content="AI that lives in the web — agents that inhabit living web pages, see what you see, and respond in real time.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://flo.monster/">
+  <meta property="og:title" content="flo.monster">
+  <meta property="og:description" content="AI that lives in the web — agents that inhabit living web pages, see what you see, and respond in real time.">
+  <meta property="og:image" content="https://flo.monster/og-image.jpg">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="flo.monster">
+  <meta name="twitter:description" content="AI that lives in the web — agents that inhabit living web pages, see what you see, and respond in real time.">
+  <meta name="twitter:image" content="https://flo.monster/og-image.jpg">
+  <link rel="stylesheet" href="/src/ui/styles.css" />
+  <style>
+    /* Loading screen - shown immediately, hidden when app is ready */
+    #loading-screen {
+      position: fixed;
+      inset: 0;
+      background: #ffffff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 9999;
+    }
+    #loading-screen.fade-out {
+      animation: fadeOut 0.5s ease-out forwards;
+    }
+    #loading-screen.hidden {
+      display: none;
+    }
+    @keyframes fadeOut {
+      from { opacity: 1; }
+      to { opacity: 0; }
+    }
+    #loading-screen img {
+      width: 200px;
+      height: auto;
+      animation: spin 2.5s linear infinite;
+    }
+    @keyframes spin {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+    /* Hide app until ready */
+    #app.loading {
+      visibility: hidden;
+    }
+  </style>
+</head>
+<body>
+  <!-- Loading screen - visible immediately -->
+  <div id="loading-screen">
+    <img src="/skins/flo-monster/assets/flo-spinner.jpg" alt="Loading...">
+  </div>
+
+  <div id="app" class="loading">
+    <!-- Nav header will be inserted here by JavaScript -->
+    <div id="nav-header-container"></div>
+
+    <header class="top-bar">
+      <a href="#" id="top-bar-logo" class="top-bar__logo" title="Back to homepage">
+        <img src="/skins/flo-monster/assets/logo-flo.jpg" alt="flo.monster" class="top-bar__logo-img">
+      </a>
+      <div class="top-bar__actions">
+        <button id="new-agent-btn" class="btn btn--primary" title="Create new agent">New Agent</button>
+        <button id="install-btn" class="btn" title="Install app" hidden>Install</button>
+        <button id="settings-btn" class="icon-btn" title="Settings" aria-label="Settings">&#9881;</button>
+      </div>
+    </header>
+
+    <!-- Outer skin container will be inserted here by JavaScript -->
+    <div id="outer-skin-root"></div>
+
+    <main id="main-content" class="main-area"></main>
+    <footer class="status-bar" id="status-bar">
+      <span id="status-state" class="status-bar__item">Initializing...</span>
+    </footer>
+    <div id="agent-iframes" style="position:fixed;left:-10000px;top:0;width:1px;height:1px;overflow:hidden;"></div>
+  </div>
+  <div id="api-key-overlay" class="overlay" hidden>
+    <div class="overlay__card">
+      <button type="button" id="api-key-overlay-close" class="overlay__close" aria-label="Close">&times;</button>
+      <h2>Welcome to flo.monster</h2>
+      <p>Choose how to access AI services:</p>
+
+      <!-- Tab buttons -->
+      <div class="setup-tabs">
+        <button type="button" id="tab-own-key" class="setup-tab setup-tab--active">My Own API Key</button>
+        <button type="button" id="tab-hub" class="setup-tab">Connect to Hub</button>
+      </div>
+
+      <!-- Own API Key form -->
+      <form id="api-key-form" class="setup-form">
+        <p class="setup-form__desc">Enter your API key. It's encrypted and stored locally.</p>
+        <label for="api-key-provider" class="setup-form__label">Provider</label>
+        <select id="api-key-provider" class="setup-form__input">
+          <option value="anthropic">Anthropic</option>
+          <option value="openai">OpenAI</option>
+          <option value="gemini">Google Gemini</option>
+        </select>
+        <label for="api-key-input" class="setup-form__label">API Key</label>
+        <input id="api-key-input" type="password" class="setup-form__input" placeholder="sk-ant-..." required autocomplete="off" />
+        <button type="submit" class="setup-form__submit btn btn--primary">Save &amp; Continue</button>
+        <p class="setup-form__note">Your key never leaves your browser except to call the AI provider's API.</p>
+      </form>
+
+      <!-- Hub connection form (hidden by default) -->
+      <form id="hub-setup-form" class="setup-form" hidden>
+        <p class="setup-form__desc">Connect to a hub server that provides API access.</p>
+        <label for="hub-url-input" class="setup-form__label">Hub URL</label>
+        <input id="hub-url-input" type="text" class="setup-form__input" placeholder="ws://localhost:8765 or wss://..." required />
+        <label for="hub-token-input" class="setup-form__label">Token (optional for localhost)</label>
+        <input id="hub-token-input" type="password" class="setup-form__input" placeholder="Hub access token" autocomplete="off" />
+        <div id="hub-status" class="setup-form__status"></div>
+        <button type="submit" class="setup-form__submit btn btn--primary">Connect</button>
+        <p class="setup-form__note">The hub provides API access - no need for your own key.</p>
+      </form>
+    </div>
+  </div>
+  <script type="module" src="/src/shell/main.ts"></script>
+</body>
+</html>

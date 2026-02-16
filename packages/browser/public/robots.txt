@@ -1,0 +1,7 @@
+# flo.monster — AI that lives in the web
+# https://flo.monster
+
+User-agent: *
+Allow: /
+
+Sitemap: https://flo.monster/sitemap.xml

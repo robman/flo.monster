@@ -1,0 +1,16 @@
+{
+  "id": "installer",
+  "name": "flo.monster Self-Hosted",
+  "version": "1.0.0",
+  "contentUrl": "content.html",
+  "stylesUrl": "styles.css",
+  "scriptUrl": "script.js",
+  "homepage": {
+    "sections": ["welcome"],
+    "ctaAction": "credentials"
+  },
+  "navigation": {
+    "logoAlt": "flo.monster",
+    "showDashboardLink": true
+  }
+}
