@@ -159,8 +159,9 @@ runcmd:
       systemctl start flo-hub
     fi
 
-  # Make flo-admin CLI available system-wide
-  - ln -sf /home/flo-hub/flo.monster/scripts/flo-admin.sh /usr/local/bin/flo-admin
+  # Make flo-admin CLI available system-wide (copy, not symlink — /home/flo-hub is 750)
+  - cp /home/flo-hub/flo.monster/scripts/flo-admin.sh /usr/local/bin/flo-admin
+  - chmod +x /usr/local/bin/flo-admin
 
   # Remove broad sudo access for flo-hub now that setup is complete.
   # Only the flo-agent sudoers rule in /etc/sudoers.d/flo-monster remains.
