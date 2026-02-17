@@ -398,6 +398,83 @@ flo.monster runs over HTTPS, so PWA installation and push notifications work reg
 
 **Hub with public domain** -- same features, plus access from any network and encrypted transport via `wss://`. Requires a domain with DNS pointing to a public IP, and the automated installer configures Caddy for automatic TLS certificate provisioning.
 
+## Using Dynamic DNS (No Domain Required)
+
+You don't need to own a domain name to get a public hub with TLS. If your home router supports Dynamic DNS (DDNS), you can use a free DDNS hostname instead. This gives you encrypted `wss://` connections and access from anywhere -- the same as a "real" domain.
+
+### How It Works
+
+Dynamic DNS services give you a hostname like `myhub.duckdns.org` that always points to your home IP address, even when your ISP changes it. Your router (or a small client running on your network) keeps the DNS record updated automatically.
+
+Combined with port forwarding, this makes your hub reachable from the internet -- and Caddy handles TLS certificates automatically.
+
+### Step 1: Choose a DDNS Provider
+
+Many home routers have built-in support for one or more of these services:
+
+| Provider | Free tier | Notes |
+|----------|-----------|-------|
+| [DuckDNS](https://www.duckdns.org) | Yes (unlimited) | Simple, no account needed beyond login |
+| [No-IP](https://www.noip.com) | Yes (3 hostnames) | Widely supported by routers |
+| [Dynu](https://www.dynu.com) | Yes | Supports custom domains too |
+| [FreeDNS](https://freedns.afraid.org) | Yes | Large selection of shared domains |
+
+Check your router's admin page -- most consumer routers (Netgear, ASUS, TP-Link, etc.) have a DDNS section under WAN or Internet settings where you can enter your provider credentials.
+
+### Step 2: Configure Your Router
+
+1. **Set up DDNS** in your router's admin panel. Enter your provider, hostname, and credentials. The router will automatically update the DNS record whenever your public IP changes.
+
+2. **Set up port forwarding** to route incoming traffic to your hub machine:
+
+   | External port | Internal IP | Internal port | Protocol |
+   |---------------|-------------|---------------|----------|
+   | 80 | *(your hub machine's LAN IP)* | 80 | TCP |
+   | 443 | *(your hub machine's LAN IP)* | 443 | TCP |
+   | 8765 | *(your hub machine's LAN IP)* | 8765 | TCP |
+
+   **Why three ports?**
+   - **Port 80** -- Caddy needs this for the Let's Encrypt ACME HTTP-01 challenge (certificate provisioning). Traffic on this port is only used briefly during certificate issuance and renewal.
+   - **Port 443** -- Caddy serves HTTPS here (optional, for general web access to your hub).
+   - **Port 8765** -- The WebSocket port your browser connects to via `wss://`.
+
+   If your hub runs inside a Multipass VM, forward to the VM's IP (find it with `multipass info flo-hub`), not your host machine's IP.
+
+### Step 3: Run the Installer
+
+Run the installer with your DDNS hostname as the domain:
+
+```bash
+curl -fsSL https://flo.monster/install/hub.sh | bash
+```
+
+When prompted, choose **Domain + TLS** and enter your DDNS hostname (e.g. `myhub.duckdns.org`). The installer configures Caddy, which automatically provisions a Let's Encrypt TLS certificate for your hostname.
+
+### Step 4: Connect
+
+In your browser, connect to your hub using the DDNS hostname:
+
+- **URL**: `wss://myhub.duckdns.org:8765`
+- **Token**: the authentication token shown during installation
+
+This works from any network -- home, office, mobile data -- with full TLS encryption.
+
+### Troubleshooting DDNS Setup
+
+**Certificate provisioning fails (Caddy logs show ACME errors)**
+- Verify port 80 is forwarded correctly. Let's Encrypt must reach your machine on port 80 to complete the HTTP-01 challenge.
+- Some ISPs block inbound port 80. Check with your ISP, or try a provider that supports DNS-01 challenges (which don't need inbound ports).
+- Wait a few minutes after setting up DDNS -- DNS propagation can take time.
+
+**Connection works on LAN but not from outside**
+- Confirm your DDNS hostname resolves to your public IP: `nslookup myhub.duckdns.org`
+- Check that port 8765 is forwarded. Some routers only forward when the rule is explicitly saved and applied.
+- Some routers don't support "NAT loopback" (connecting to your own public IP from inside your network). If this affects you, use the LAN IP (`ws://192.168.x.x:8765`) when at home and the DDNS hostname when away.
+
+**Hub becomes unreachable after IP change**
+- Verify your router's DDNS client is running and authenticated. Most routers show the last update time in the DDNS settings page.
+- If your router doesn't support your DDNS provider, you can run a lightweight update client on the hub machine itself. DuckDNS, for example, provides a simple cron-based updater.
+
 ## Further Reading
 
 - **[Scheduling Tasks](Scheduling-Tasks.md)** -- Cron jobs and event triggers for autonomous agents
