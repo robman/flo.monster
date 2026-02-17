@@ -21,6 +21,7 @@ set -euo pipefail
 VERSION="1.0.0"
 FLO_REPO_URL="${FLO_REPO_URL:-https://github.com/robman/flo.monster.git}"
 FLO_BASE_URL="${FLO_BASE_URL:-https://flo.monster}"
+FLO_REPO_BRANCH="${FLO_REPO_BRANCH:-}"
 NODE_VERSION="22"
 HUB_PORT=8765
 ADMIN_PORT=8766
@@ -223,6 +224,8 @@ OPTIONS:
 
 ENVIRONMENT VARIABLES:
   FLO_REPO_URL          Git repository URL (default: https://github.com/robman/flo.monster.git)
+  FLO_REPO_BRANCH       Git branch to clone (default: repo default branch)
+  FLO_BASE_URL          Base URL for downloading installer assets (default: https://flo.monster)
   FLO_INSTANCE_NAME     Same as --instance-name
   FLO_EMAIL             Same as --email
   FLO_DOMAIN            Same as --domain
@@ -241,6 +244,15 @@ EXAMPLES:
 
   # Force Multipass mode on Linux
   ./scripts/install-hub.sh --mode multipass
+
+DEVELOPER TESTING:
+  To test installer changes without deploying to production:
+
+  # Test against a local cloud-init template and specific branch
+  FLO_BASE_URL=/path/to/repo/scripts FLO_REPO_BRANCH=my-feature-branch ./scripts/install-hub.sh
+
+  # Test against a specific GitHub fork and branch
+  FLO_REPO_URL=https://github.com/yourfork/flo.monster.git FLO_REPO_BRANCH=my-branch ./scripts/install-hub.sh
 
 HELPTEXT
 }
@@ -576,6 +588,11 @@ install_multipass() {
     error "Multipass installation failed."
     exit 1
   fi
+
+  # Give the daemon time to initialize after fresh install
+  info "Waiting for Multipass daemon to initialize..."
+  sleep 5
+
   success "Multipass installed successfully"
 }
 
@@ -585,14 +602,25 @@ install_multipass() {
 create_cloud_init() {
   local template_path="${SCRIPT_DIR}/hub-cloud-init.yaml"
   if [[ ! -f "$template_path" ]]; then
-    # When piped from curl, download the template from the same server
-    # NOTE: info must go to stderr — this function's stdout is captured by $()
-    info "Downloading cloud-init template..." >&2
     template_path="$(mktemp)"
     CLEANUP_FILES+=("$template_path")
-    if ! curl -fsSL "${FLO_BASE_URL}/install/hub-cloud-init.yaml" -o "$template_path"; then
-      error "Failed to download cloud-init template from ${FLO_BASE_URL}/install/hub-cloud-init.yaml"
-      exit 1
+    if [[ "$FLO_BASE_URL" != http* ]]; then
+      # Local path — copy directly
+      local local_template="${FLO_BASE_URL}/hub-cloud-init.yaml"
+      info "Using local cloud-init template: ${local_template}" >&2
+      if [[ ! -f "$local_template" ]]; then
+        error "Local cloud-init template not found: ${local_template}"
+        exit 1
+      fi
+      cp "$local_template" "$template_path"
+    else
+      # Remote URL — download
+      # NOTE: info must go to stderr — this function's stdout is captured by $()
+      info "Downloading cloud-init template..." >&2
+      if ! curl -fsSL "${FLO_BASE_URL}/install/hub-cloud-init.yaml" -o "$template_path"; then
+        error "Failed to download cloud-init template from ${FLO_BASE_URL}/install/hub-cloud-init.yaml"
+        exit 1
+      fi
     fi
   fi
 
@@ -620,6 +648,7 @@ create_cloud_init() {
   # Perform placeholder substitutions (must match hub-cloud-init.yaml placeholders)
   sed \
     -e "s|{{FLO_REPO_URL}}|${FLO_REPO_URL}|g" \
+    -e "s|{{FLO_REPO_BRANCH}}|${FLO_REPO_BRANCH}|g" \
     -e "s|{{AUTH_TOKEN}}|${AUTH_TOKEN}|g" \
     -e "s|{{VAPID_EMAIL}}|${EMAIL}|g" \
     -e "s|{{HUB_HOST}}|${hub_host}|g" \
@@ -699,6 +728,23 @@ run_multipass_install() {
   info "Generating cloud-init configuration..."
   local cloud_init_file
   cloud_init_file="$(create_cloud_init)"
+
+  # Pre-flight: verify Multipass can reach the image catalog
+  info "Checking Multipass image availability..."
+  if ! multipass find "$MULTIPASS_IMAGE" >/dev/null 2>&1; then
+    warn "Multipass cannot reach the image catalog."
+    echo "  This often happens right after install — retrying in 10 seconds..."
+    sleep 10
+    if ! multipass find "$MULTIPASS_IMAGE" >/dev/null 2>&1; then
+      error "Multipass still cannot reach the Ubuntu image catalog."
+      echo "  Possible causes:"
+      echo "    - Multipass daemon is still starting (try again in a minute)"
+      echo "    - Network/firewall blocking access to cloud-images.ubuntu.com"
+      echo "    - VPN interfering with Multipass networking"
+      echo "  Try: multipass find"
+      exit 1
+    fi
+  fi
 
   # Launch VM
   info "Launching Multipass VM '$INSTANCE_NAME'..."
@@ -1243,6 +1289,18 @@ main() {
 
   parse_args "$@"
   apply_env_defaults
+
+  # Log dev overrides if any are set
+  if [[ "$FLO_BASE_URL" != "https://flo.monster" ]]; then
+    info "Using custom FLO_BASE_URL: ${FLO_BASE_URL}"
+  fi
+  if [[ -n "$FLO_REPO_BRANCH" ]]; then
+    info "Using custom FLO_REPO_BRANCH: ${FLO_REPO_BRANCH}"
+  fi
+  if [[ "$FLO_REPO_URL" != "https://github.com/robman/flo.monster.git" ]]; then
+    info "Using custom FLO_REPO_URL: ${FLO_REPO_URL}"
+  fi
+
   detect_environment
   prompt_config
 

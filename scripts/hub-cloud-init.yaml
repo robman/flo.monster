@@ -14,6 +14,7 @@
 #   {{SETUP_CADDY}}    — "true" or "false" (install/enable Caddy reverse proxy)
 #   {{SETUP_SYSTEMD}}  — "true" or "false" (enable systemd service)
 #   {{FLO_REPO_URL}}   — Git clone URL for the flo.monster repository
+#   {{FLO_REPO_BRANCH}}  — Git branch to clone (empty = default branch)
 #
 # Security notes:
 # - The auth token is present in this file. Mitigated by:
@@ -136,7 +137,12 @@ runcmd:
   - su - flo-hub -c 'source ~/setup-env.sh && corepack enable && corepack prepare pnpm@latest --activate'
 
   # Clone repo and install dependencies
-  - su - flo-hub -c 'git clone {{FLO_REPO_URL}} /home/flo-hub/flo.monster'
+  - |
+    if [ -n "{{FLO_REPO_BRANCH}}" ]; then
+      su - flo-hub -c 'git clone -b {{FLO_REPO_BRANCH}} {{FLO_REPO_URL}} /home/flo-hub/flo.monster'
+    else
+      su - flo-hub -c 'git clone {{FLO_REPO_URL}} /home/flo-hub/flo.monster'
+    fi
   - su - flo-hub -c 'source ~/setup-env.sh && cd /home/flo-hub/flo.monster && pnpm install --frozen-lockfile'
 
   # Conditional: Install and configure Caddy reverse proxy

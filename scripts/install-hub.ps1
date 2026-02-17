@@ -35,7 +35,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 $Version = "1.0.0"
-$FloRepoUrl = "https://github.com/robman/flo.monster.git"
+$FloRepoUrl = if ($env:FLO_REPO_URL) { $env:FLO_REPO_URL } else { "https://github.com/robman/flo.monster.git" }
+$FloRepoBranch = if ($env:FLO_REPO_BRANCH) { $env:FLO_REPO_BRANCH } else { "" }
+$FloBaseUrl = if ($env:FLO_BASE_URL) { $env:FLO_BASE_URL } else { "https://flo.monster" }
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 # --- Output helpers ---
@@ -110,6 +112,8 @@ function Install-Multipass {
         Write-InfoMsg "Installing Multipass via winget..."
         & winget install Canonical.Multipass --accept-package-agreements --accept-source-agreements
         if ($LASTEXITCODE -eq 0) {
+            Write-InfoMsg "Waiting for Multipass daemon to initialize..."
+            Start-Sleep -Seconds 5
             Write-SuccessMsg "Multipass installed via winget"
             return
         }
@@ -121,6 +125,8 @@ function Install-Multipass {
         Write-InfoMsg "Installing Multipass via Chocolatey..."
         & choco install multipass -y
         if ($LASTEXITCODE -eq 0) {
+            Write-InfoMsg "Waiting for Multipass daemon to initialize..."
+            Start-Sleep -Seconds 5
             Write-SuccessMsg "Multipass installed via Chocolatey"
             return
         }
@@ -164,6 +170,7 @@ function Get-Configuration {
         SetupCaddy   = ""
         SetupSystemd = ""
         RepoUrl      = $FloRepoUrl
+        RepoBranch   = $FloRepoBranch
     }
 
     if ($NonInteractive) {
@@ -267,6 +274,7 @@ function New-CloudInitFile {
     $content = $content -replace '\{\{SETUP_CADDY\}\}', $Config.SetupCaddy
     $content = $content -replace '\{\{SETUP_SYSTEMD\}\}', $Config.SetupSystemd
     $content = $content -replace '\{\{FLO_REPO_URL\}\}', $Config.RepoUrl
+    $content = $content -replace '\{\{FLO_REPO_BRANCH\}\}', $Config.RepoBranch
 
     # Write to temp file
     $tempFile = [System.IO.Path]::GetTempFileName()
@@ -312,6 +320,17 @@ function Start-MultipassInstall {
         [string]$CloudInitFile
     )
 
+    # Log dev overrides
+    if ($FloRepoUrl -ne "https://github.com/robman/flo.monster.git") {
+        Write-InfoMsg "Using custom FLO_REPO_URL: $FloRepoUrl"
+    }
+    if ($FloRepoBranch) {
+        Write-InfoMsg "Using custom FLO_REPO_BRANCH: $FloRepoBranch"
+    }
+    if ($FloBaseUrl -ne "https://flo.monster") {
+        Write-InfoMsg "Using custom FLO_BASE_URL: $FloBaseUrl"
+    }
+
     # Check for existing VM with same name
     if (Test-ExistingVM -Name $Config.InstanceName) {
         Write-ErrorMsg "A Multipass VM named '$($Config.InstanceName)' already exists."
@@ -321,6 +340,24 @@ function Start-MultipassInstall {
         Write-Host "  Or choose a different name with -InstanceName" -ForegroundColor Yellow
         Write-Host ""
         exit 1
+    }
+
+    # Pre-flight: verify Multipass can reach the image catalog
+    Write-InfoMsg "Checking Multipass image availability..."
+    & multipass find 24.04 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-WarnMsg "Multipass cannot reach the image catalog. Retrying in 10 seconds..."
+        Start-Sleep -Seconds 10
+        & multipass find 24.04 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-ErrorMsg "Multipass still cannot reach the Ubuntu image catalog."
+            Write-Host "  Possible causes:" -ForegroundColor Yellow
+            Write-Host "    - Multipass daemon is still starting (try again in a minute)" -ForegroundColor Yellow
+            Write-Host "    - Network/firewall blocking access to cloud-images.ubuntu.com" -ForegroundColor Yellow
+            Write-Host "    - VPN interfering with Multipass networking" -ForegroundColor Yellow
+            Write-Host "  Try: multipass find" -ForegroundColor Yellow
+            exit 1
+        }
     }
 
     Write-InfoMsg "Launching Multipass VM '$($Config.InstanceName)'..."

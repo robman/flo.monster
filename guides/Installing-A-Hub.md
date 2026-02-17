@@ -319,6 +319,42 @@ Once connected to a hub, you can persist browser agents to the hub for always-on
 
 When a browser reconnects, it becomes a display surface for the hub-persisted agent. The hub is the authority for all state; the browser renders and relays user input.
 
+## Developer Testing
+
+If you're working on the installer itself, you can test changes without deploying to production by overriding two environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `FLO_BASE_URL` | `https://flo.monster` | Where the installer downloads its cloud-init template from. Set to a local directory path to use local files instead. |
+| `FLO_REPO_BRANCH` | *(default branch)* | Git branch to clone inside the VM. Test your changes on a pushed branch without merging to main. |
+| `FLO_REPO_URL` | `https://github.com/robman/flo.monster.git` | Git repository URL. Override to test against a fork. |
+
+### Example: Test a Feature Branch
+
+Push your branch to GitHub, then run the installer against it using the local cloud-init template:
+
+```bash
+FLO_BASE_URL=./scripts FLO_REPO_BRANCH=my-feature-branch ./scripts/install-hub.sh
+```
+
+This uses the local `hub-cloud-init.yaml` (no CDN needed) and clones your branch inside the VM instead of main.
+
+### Example: Test a Fork
+
+```bash
+FLO_REPO_URL=https://github.com/yourfork/flo.monster.git FLO_REPO_BRANCH=my-branch ./scripts/install-hub.sh
+```
+
+### Windows
+
+```powershell
+$env:FLO_BASE_URL = "C:\path\to\repo\scripts"
+$env:FLO_REPO_BRANCH = "my-feature-branch"
+.\scripts\install-hub.ps1
+```
+
+The installer logs any active overrides at startup so you can confirm which values are in effect.
+
 ## Troubleshooting
 
 ### Connection Refused
