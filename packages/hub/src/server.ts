@@ -11,7 +11,7 @@ import type { IncomingMessage } from 'node:http';
 import { createServer as createHttpServer, type Server as HttpServer } from 'node:http';
 import { createServer as createHttpsServer, type Server as HttpsServer } from 'node:https';
 import { readFileSync, mkdirSync, existsSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, networkInterfaces } from 'node:os';
 import { join } from 'node:path';
 import type { HookRulesConfig } from '@flo-monster/core';
 import type { HubConfig } from './config.js';
@@ -78,17 +78,48 @@ export interface HubServer {
 }
 
 /**
+ * Get the first non-loopback IPv4 address from the machine's network interfaces.
+ */
+function getLocalIpAddress(): string | null {
+  const nets = networkInterfaces();
+  for (const name of Object.keys(nets)) {
+    for (const net of nets[name] || []) {
+      // Skip loopback and non-IPv4
+      if (net.family === 'IPv4' && !net.internal) {
+        return net.address;
+      }
+    }
+  }
+  return null;
+}
+
+/**
  * Create and start the hub server
  */
 export function createHubServer(config: HubConfig): HubServer {
-  // Validate: publicHost is required when sharedApiKeys or cliProviders is configured
+  // Auto-derive publicHost when sharedApiKeys or cliProviders is configured but publicHost is not set
   const hasSharedKeys = config.sharedApiKeys && Object.keys(config.sharedApiKeys).length > 0;
   const hasCliProviders = config.cliProviders && Object.keys(config.cliProviders).length > 0;
   if ((hasSharedKeys || hasCliProviders) && !config.publicHost) {
-    throw new Error(
-      'publicHost must be configured when sharedApiKeys or cliProviders is set. ' +
-      'The publicHost is needed for browsers to reach the hub HTTP API.',
-    );
+    // For bind-all addresses, detect the machine's LAN IP
+    if (config.host === '0.0.0.0' || config.host === '::') {
+      const lanIp = getLocalIpAddress();
+      if (lanIp) {
+        config.publicHost = lanIp;
+        console.log(`[hub] Auto-derived publicHost from LAN IP: ${lanIp}`);
+      } else {
+        throw new Error(
+          'publicHost must be configured when sharedApiKeys or cliProviders is set. ' +
+          'Could not auto-detect a LAN IP address. Set publicHost in hub.json.',
+        );
+      }
+    } else {
+      throw new Error(
+        'publicHost must be configured when sharedApiKeys or cliProviders is set. ' +
+        `The hub is bound to ${config.host} which may not be reachable by browsers. ` +
+        'Set publicHost in hub.json to the hostname or IP browsers should use.',
+      );
+    }
   }
 
   // Ensure sandbox directory exists

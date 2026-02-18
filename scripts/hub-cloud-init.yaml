@@ -147,7 +147,7 @@ runcmd:
     fi
   - su - flo-hub -c 'source ~/setup-env.sh && cd /home/flo-hub/flo.monster && pnpm install --frozen-lockfile'
 
-  # Conditional: Generate self-signed TLS cert for local mode
+  # Conditional: Generate self-signed TLS cert for local mode and set publicHost
   - |
     if [ "{{SETUP_CADDY}}" != "true" ]; then
       mkdir -p /home/flo-hub/.flo-monster/tls
@@ -163,9 +163,14 @@ runcmd:
       chmod 700 /home/flo-hub/.flo-monster/tls
       chmod 600 /home/flo-hub/.flo-monster/tls/key.pem
       chmod 644 /home/flo-hub/.flo-monster/tls/cert.pem
+      # Set publicHost to the VM IP (matches the TLS cert SAN)
+      HUB_JSON=/home/flo-hub/.flo-monster/hub.json
+      jq --arg ip "$VM_IP" '.publicHost = $ip' "$HUB_JSON" > "${HUB_JSON}.tmp" && mv "${HUB_JSON}.tmp" "$HUB_JSON"
+      chown flo-hub:flo-hub "$HUB_JSON"
+      chmod 600 "$HUB_JSON"
     fi
 
-  # Conditional: Install and configure Caddy reverse proxy
+  # Conditional: Install and configure Caddy reverse proxy, set publicHost to domain
   - |
     if [ "{{SETUP_CADDY}}" = "true" ]; then
       apt-get install -y debian-keyring debian-archive-keyring apt-transport-https
@@ -175,6 +180,11 @@ runcmd:
       apt-get install -y caddy
       systemctl enable caddy
       systemctl start caddy
+      # Set publicHost to the domain
+      HUB_JSON=/home/flo-hub/.flo-monster/hub.json
+      jq --arg domain "{{DOMAIN}}" '.publicHost = $domain' "$HUB_JSON" > "${HUB_JSON}.tmp" && mv "${HUB_JSON}.tmp" "$HUB_JSON"
+      chown flo-hub:flo-hub "$HUB_JSON"
+      chmod 600 "$HUB_JSON"
     fi
 
   # Conditional: Enable and start systemd service

@@ -461,16 +461,19 @@ prompt_config() {
 # generate_hub_json — Output hub.json content to stdout
 # -----------------------------------------------------------------------------
 generate_hub_json() {
-  local host bind_host trust_proxy tls_block=""
+  local host bind_host trust_proxy public_host tls_block=""
 
   if [[ "$SETUP_TYPE" == "domain" ]]; then
     # Behind Caddy reverse proxy: bind to localhost only
     bind_host="127.0.0.1"
     trust_proxy="true"
+    public_host="${DOMAIN}"
   else
     # Local-only: bind to all interfaces so LAN can reach it
     bind_host="0.0.0.0"
     trust_proxy="false"
+    # publicHost = the IP used for the self-signed TLS cert SAN
+    public_host="${PUBLIC_HOST_IP:-}"
     # Self-signed TLS for local mode (so wss:// works from HTTPS pages)
     tls_block=',
   "tls": {
@@ -479,10 +482,17 @@ generate_hub_json() {
   }'
   fi
 
+  # Build optional publicHost line
+  local public_host_line=""
+  if [[ -n "$public_host" ]]; then
+    public_host_line="\"publicHost\": \"${public_host}\","
+  fi
+
   cat <<HUBJSON
 {
   "host": "${bind_host}",
   "port": ${HUB_PORT},
+  ${public_host_line}
   "name": "flo.monster Hub",
   "localhostBypassAuth": false,
   "authToken": "${AUTH_TOKEN}",
@@ -1046,7 +1056,12 @@ write_hub_config() {
   fi
 
   # Write hub.json with restrictive permissions (contains auth token)
-  generate_hub_json | sudo -u flo-hub tee "${flo_dir}/hub.json" > /dev/null
+  # For local mode, pass the server IP so generate_hub_json can set publicHost
+  if [[ "$SETUP_TYPE" != "domain" ]]; then
+    PUBLIC_HOST_IP="${server_ip}" generate_hub_json | sudo -u flo-hub tee "${flo_dir}/hub.json" > /dev/null
+  else
+    generate_hub_json | sudo -u flo-hub tee "${flo_dir}/hub.json" > /dev/null
+  fi
   sudo chmod 600 "${flo_dir}/hub.json"
 
   success "Hub configuration written to ${flo_dir}/hub.json"
