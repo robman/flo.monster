@@ -154,6 +154,17 @@ describe('HTTP Server', () => {
     });
   });
 
+  describe('GET /tls-setup', () => {
+    it('should return HTML page with certificate acceptance message', async () => {
+      const response = await makeRequest('GET', '/tls-setup');
+
+      expect(response.status).toBe(200);
+      expect(response.headers['content-type']).toContain('text/html');
+      expect(response.body).toContain('Certificate Accepted');
+      expect(response.body).toContain('flo.monster');
+    });
+  });
+
   describe('POST /api/v1/messages', () => {
     it('should return 401 without x-hub-token', async () => {
       const response = await makeRequest(

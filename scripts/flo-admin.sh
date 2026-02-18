@@ -137,6 +137,7 @@ cmd_info() {
   hub_ip="$(get_hub_ip)"
 
   # Determine the hub URL
+  local show_cert_step="false"
   if [[ "$hub_host" == "127.0.0.1" ]]; then
     # Behind reverse proxy (Caddy) — likely domain mode
     local domain=""
@@ -151,7 +152,16 @@ cmd_info() {
       echo
     fi
   else
-    hub_url="ws://${hub_ip}:${HUB_PORT}"
+    # Local mode — check if TLS is configured
+    local has_tls
+    has_tls="$(echo "$json" | grep -c '"certFile"' || true)"
+
+    if [[ "$has_tls" -gt 0 ]]; then
+      hub_url="wss://${hub_ip}:${HUB_PORT}"
+      show_cert_step="true"
+    else
+      hub_url="ws://${hub_ip}:${HUB_PORT}"
+    fi
   fi
 
   echo
@@ -168,11 +178,21 @@ cmd_info() {
   echo "  How to connect from the browser:"
   hr
   echo
-  echo "  1. Open flo.monster in your browser"
-  echo "  2. Go to Settings > Hub"
-  echo "  3. Enter the Hub URL: ${hub_url}"
-  echo "  4. Enter the Auth Token shown above"
-  echo "  5. Click Connect"
+  if [[ "$show_cert_step" == "true" ]]; then
+    echo "  1. First, open https://${hub_ip}:${HUB_PORT}/tls-setup in your browser"
+    echo "     and accept the self-signed certificate warning"
+    echo "  2. Open flo.monster in your browser"
+    echo "  3. Go to Settings > Hub"
+    echo "  4. Enter the Hub URL: ${hub_url}"
+    echo "  5. Enter the Auth Token shown above"
+    echo "  6. Click Connect"
+  else
+    echo "  1. Open flo.monster in your browser"
+    echo "  2. Go to Settings > Hub"
+    echo "  3. Enter the Hub URL: ${hub_url}"
+    echo "  4. Enter the Auth Token shown above"
+    echo "  5. Click Connect"
+  fi
   echo
   hr
 }

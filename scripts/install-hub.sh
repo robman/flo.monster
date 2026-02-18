@@ -218,7 +218,7 @@ OPTIONS:
   --instance-name NAME  Multipass VM instance name (default: flo-hub)
   --email ADDRESS       Email for push notifications and TLS certificates
   --domain DOMAIN       Domain name (implies domain+TLS setup type)
-  --local-only          Local-only setup (no domain, no TLS)
+  --local-only          Local-only setup (no domain, self-signed TLS)
   --systemd             Install systemd service (direct mode, default)
   --no-systemd          Do not install systemd service
 
@@ -304,6 +304,33 @@ generate_auth_token() {
 }
 
 # -----------------------------------------------------------------------------
+# generate_self_signed_cert — Create a self-signed TLS cert for local mode
+# Args: $1 = IP address (for SAN), $2 = target directory
+# -----------------------------------------------------------------------------
+generate_self_signed_cert() {
+  local ip="$1"
+  local tls_dir="$2"
+
+  info "Generating self-signed TLS certificate for ${ip}..."
+
+  mkdir -p "$tls_dir"
+  chmod 700 "$tls_dir"
+
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+    -keyout "${tls_dir}/key.pem" \
+    -out "${tls_dir}/cert.pem" \
+    -days 3650 -nodes \
+    -subj "/CN=flo-monster-hub" \
+    -addext "subjectAltName=IP:${ip}" \
+    2>/dev/null
+
+  chmod 600 "${tls_dir}/key.pem"
+  chmod 644 "${tls_dir}/cert.pem"
+
+  success "TLS certificate generated (self-signed, valid 10 years)"
+}
+
+# -----------------------------------------------------------------------------
 # apply_env_defaults — Read config from env vars if flags weren't set
 # -----------------------------------------------------------------------------
 apply_env_defaults() {
@@ -359,7 +386,7 @@ prompt_config() {
     else
       echo
       echo "Setup type:"
-      echo "  1) Local only — hub accessible on LAN, no TLS"
+      echo "  1) Local only — hub accessible on LAN, self-signed TLS"
       echo "  2) Domain + TLS — public domain with automatic HTTPS via Caddy"
       echo
       while true; do
@@ -434,7 +461,7 @@ prompt_config() {
 # generate_hub_json — Output hub.json content to stdout
 # -----------------------------------------------------------------------------
 generate_hub_json() {
-  local host bind_host trust_proxy
+  local host bind_host trust_proxy tls_block=""
 
   if [[ "$SETUP_TYPE" == "domain" ]]; then
     # Behind Caddy reverse proxy: bind to localhost only
@@ -444,6 +471,12 @@ generate_hub_json() {
     # Local-only: bind to all interfaces so LAN can reach it
     bind_host="0.0.0.0"
     trust_proxy="false"
+    # Self-signed TLS for local mode (so wss:// works from HTTPS pages)
+    tls_block=',
+  "tls": {
+    "certFile": "/home/flo-hub/.flo-monster/tls/cert.pem",
+    "keyFile": "/home/flo-hub/.flo-monster/tls/key.pem"
+  }'
   fi
 
   cat <<HUBJSON
@@ -498,7 +531,7 @@ generate_hub_json() {
   "failedAuthConfig": {
     "maxAttempts": 5,
     "lockoutMinutes": 15
-  }
+  }${tls_block}
 }
 HUBJSON
 }
@@ -630,18 +663,21 @@ create_cloud_init() {
   CLEANUP_FILES+=("$tmpfile")
 
   # Compute template values
-  local hub_host trust_proxy setup_caddy setup_systemd safe_domain
+  local hub_host trust_proxy setup_caddy setup_systemd safe_domain tls_config
   if [[ "$SETUP_TYPE" == "domain" ]]; then
     hub_host="127.0.0.1"
     trust_proxy="true"
     setup_caddy="true"
     safe_domain="$DOMAIN"
+    tls_config=""
   else
     hub_host="0.0.0.0"
     trust_proxy="false"
     setup_caddy="false"
     # Empty domain breaks YAML (bare { becomes flow mapping) — use placeholder
     safe_domain="placeholder.local"
+    # Self-signed TLS for local mode — note: leading comma included
+    tls_config='"tls": { "certFile": "/home/flo-hub/.flo-monster/tls/cert.pem", "keyFile": "/home/flo-hub/.flo-monster/tls/key.pem" },'
   fi
   setup_systemd="true"
 
@@ -656,6 +692,7 @@ create_cloud_init() {
     -e "s|{{DOMAIN}}|${safe_domain}|g" \
     -e "s|{{SETUP_CADDY}}|${setup_caddy}|g" \
     -e "s|{{SETUP_SYSTEMD}}|${setup_systemd}|g" \
+    -e "s|{{TLS_CONFIG}}|${tls_config}|g" \
     "$template_path" > "$tmpfile"
 
   # Multipass daemon runs as a separate user — file must be readable
@@ -673,9 +710,17 @@ health_check_hub() {
   local max_attempts=30
   local attempt=0
 
+  # Use HTTPS for local-mode TLS, HTTP for domain mode (behind Caddy)
+  local scheme="http"
+  local curl_flags="-sf"
+  if [[ "$SETUP_TYPE" != "domain" ]]; then
+    scheme="https"
+    curl_flags="-sfk"  # -k accepts self-signed certs
+  fi
+
   info "Verifying hub is running..."
   while [[ $attempt -lt $max_attempts ]]; do
-    if curl -sf "http://${host}:${port}/api/status" 2>/dev/null | grep -q '"ok"'; then
+    if curl $curl_flags "${scheme}://${host}:${port}/api/status" 2>/dev/null | grep -q '"ok"'; then
       success "Hub is responding"
       return 0
     fi
@@ -990,6 +1035,16 @@ write_hub_config() {
   # Sandbox needs to be accessible by flo-agent
   sudo chmod 755 "$sandbox_dir"
 
+  # Generate self-signed TLS cert for local mode (before writing hub.json which references it)
+  if [[ "$SETUP_TYPE" != "domain" ]]; then
+    local server_ip
+    server_ip="$(hostname -I 2>/dev/null | awk '{print $1}')" || server_ip="127.0.0.1"
+    local tls_dir="${flo_dir}/tls"
+    sudo -u flo-hub mkdir -p "$tls_dir"
+    # generate_self_signed_cert needs to run as flo-hub so key ownership is correct
+    sudo -u flo-hub bash -c "$(declare -f generate_self_signed_cert info success); generate_self_signed_cert '${server_ip}' '${tls_dir}'"
+  fi
+
   # Write hub.json with restrictive permissions (contains auth token)
   generate_hub_json | sudo -u flo-hub tee "${flo_dir}/hub.json" > /dev/null
   sudo chmod 600 "${flo_dir}/hub.json"
@@ -1164,7 +1219,7 @@ print_multipass_results() {
   if [[ "$SETUP_TYPE" == "domain" ]]; then
     hub_url="wss://${DOMAIN}"
   else
-    hub_url="ws://${vm_ip}:${HUB_PORT}"
+    hub_url="wss://${vm_ip}:${HUB_PORT}"
   fi
 
   echo
@@ -1183,11 +1238,21 @@ print_multipass_results() {
   echo "  How to connect from the browser:"
   hr
   echo
-  echo "  1. Open flo.monster in your browser"
-  echo "  2. Go to Settings > Hub"
-  echo "  3. Enter the Hub URL: ${hub_url}"
-  echo "  4. Enter the Auth Token shown above"
-  echo "  5. Click Connect"
+  if [[ "$SETUP_TYPE" != "domain" ]]; then
+    echo "  1. First, open https://${vm_ip}:${HUB_PORT}/tls-setup in your browser"
+    echo "     and accept the self-signed certificate warning"
+    echo "  2. Open flo.monster in your browser"
+    echo "  3. Go to Settings > Hub"
+    echo "  4. Enter the Hub URL: ${hub_url}"
+    echo "  5. Enter the Auth Token shown above"
+    echo "  6. Click Connect"
+  else
+    echo "  1. Open flo.monster in your browser"
+    echo "  2. Go to Settings > Hub"
+    echo "  3. Enter the Hub URL: ${hub_url}"
+    echo "  4. Enter the Auth Token shown above"
+    echo "  5. Click Connect"
+  fi
   echo
   hr
   echo "  Management:"
@@ -1223,7 +1288,7 @@ print_direct_results() {
     # Try to get the server's IP address
     local server_ip
     server_ip="$(hostname -I 2>/dev/null | awk '{print $1}')" || server_ip="<server-ip>"
-    hub_url="ws://${server_ip}:${HUB_PORT}"
+    hub_url="wss://${server_ip}:${HUB_PORT}"
     host_display="$server_ip"
   fi
 
@@ -1242,11 +1307,21 @@ print_direct_results() {
   echo "  How to connect from the browser:"
   hr
   echo
-  echo "  1. Open flo.monster in your browser"
-  echo "  2. Go to Settings > Hub"
-  echo "  3. Enter the Hub URL: ${hub_url}"
-  echo "  4. Enter the Auth Token shown above"
-  echo "  5. Click Connect"
+  if [[ "$SETUP_TYPE" != "domain" ]]; then
+    echo "  1. First, open https://${host_display}:${HUB_PORT}/tls-setup in your browser"
+    echo "     and accept the self-signed certificate warning"
+    echo "  2. Open flo.monster in your browser"
+    echo "  3. Go to Settings > Hub"
+    echo "  4. Enter the Hub URL: ${hub_url}"
+    echo "  5. Enter the Auth Token shown above"
+    echo "  6. Click Connect"
+  else
+    echo "  1. Open flo.monster in your browser"
+    echo "  2. Go to Settings > Hub"
+    echo "  3. Enter the Hub URL: ${hub_url}"
+    echo "  4. Enter the Auth Token shown above"
+    echo "  5. Click Connect"
+  fi
   echo
   hr
   echo "  Management:"

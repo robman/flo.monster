@@ -134,6 +134,38 @@ function handleStatus(res: ServerResponse): void {
 }
 
 /**
+ * Handle GET /tls-setup — landing page after accepting self-signed cert
+ */
+function handleTlsSetup(res: ServerResponse): void {
+  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+  res.end(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>flo.monster Hub — TLS Setup Complete</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; background: #0a0a0a; color: #e0e0e0; }
+  .card { text-align: center; max-width: 480px; padding: 2rem; }
+  h1 { font-size: 1.5rem; margin-bottom: 0.5rem; }
+  .check { font-size: 3rem; margin-bottom: 1rem; }
+  p { color: #999; line-height: 1.6; }
+  a { color: #6ee7b7; text-decoration: none; font-weight: 600; }
+  a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="check">&#x2705;</div>
+  <h1>Certificate Accepted</h1>
+  <p>Your browser now trusts this hub's self-signed certificate.</p>
+  <p>Open <a href="https://flo.monster">flo.monster</a> to connect your hub.</p>
+</div>
+</body>
+</html>`);
+}
+
+/**
  * Provider route information
  */
 interface ProviderRoute {
@@ -357,6 +389,12 @@ export function createHttpRequestHandler(
     // Handle GET /api/status
     if (method === 'GET' && url === '/api/status') {
       handleStatus(res);
+      return;
+    }
+
+    // Handle GET /tls-setup — landing page for self-signed cert acceptance
+    if (method === 'GET' && url === '/tls-setup') {
+      handleTlsSetup(res);
       return;
     }
 

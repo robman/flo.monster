@@ -13,6 +13,7 @@
 #   {{DOMAIN}}         — Domain name for TLS (empty if local-only)
 #   {{SETUP_CADDY}}    — "true" or "false" (install/enable Caddy reverse proxy)
 #   {{SETUP_SYSTEMD}}  — "true" or "false" (enable systemd service)
+#   {{TLS_CONFIG}}     — TLS config block for hub.json (empty if domain mode)
 #   {{FLO_REPO_URL}}   — Git clone URL for the flo.monster repository
 #   {{FLO_REPO_BRANCH}}  — Git branch to clone (empty = default branch)
 #
@@ -62,6 +63,7 @@ write_files:
         "localhostBypassAuth": false,
         "authToken": "{{AUTH_TOKEN}}",
         "trustProxy": {{TRUST_PROXY}},
+        {{TLS_CONFIG}}
         "tools": {
           "bash": {
             "runAsUser": "flo-agent",
@@ -144,6 +146,24 @@ runcmd:
       su - flo-hub -c 'git clone {{FLO_REPO_URL}} /home/flo-hub/flo.monster'
     fi
   - su - flo-hub -c 'source ~/setup-env.sh && cd /home/flo-hub/flo.monster && pnpm install --frozen-lockfile'
+
+  # Conditional: Generate self-signed TLS cert for local mode
+  - |
+    if [ "{{SETUP_CADDY}}" != "true" ]; then
+      mkdir -p /home/flo-hub/.flo-monster/tls
+      VM_IP=$(hostname -I | awk '{print $1}')
+      openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+        -keyout /home/flo-hub/.flo-monster/tls/key.pem \
+        -out /home/flo-hub/.flo-monster/tls/cert.pem \
+        -days 3650 -nodes \
+        -subj "/CN=flo-monster-hub" \
+        -addext "subjectAltName=IP:${VM_IP}" \
+        2>/dev/null
+      chown -R flo-hub:flo-hub /home/flo-hub/.flo-monster/tls
+      chmod 700 /home/flo-hub/.flo-monster/tls
+      chmod 600 /home/flo-hub/.flo-monster/tls/key.pem
+      chmod 644 /home/flo-hub/.flo-monster/tls/cert.pem
+    fi
 
   # Conditional: Install and configure Caddy reverse proxy
   - |
