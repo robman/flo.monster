@@ -310,6 +310,111 @@
     };
   }
 
+  // ---- Gemini Event Mapper (inline) ----
+  function createGeminiEventMapper() {
+    var toolCallCounter = 0;
+    var textAccum = '';
+    var hasText = false;
+    var hadToolCalls = false;  // Stateful across chunks — Gemini can split functionCall and finishReason into separate chunks
+
+    function flushText(events) {
+      if (hasText && textAccum) {
+        events.push({ type: 'text_done', text: textAccum });
+        textAccum = '';
+        hasText = false;
+      }
+    }
+
+    return {
+      mapSSEEvent: function(sseEvent) {
+        if (!sseEvent.data) return [];
+        var parsed;
+        try { parsed = JSON.parse(sseEvent.data); } catch(e) { return []; }
+        var events = [];
+
+        var candidates = parsed.candidates;
+        if (candidates && candidates.length > 0) {
+          var candidate = candidates[0];
+          var content = candidate.content;
+          var parts = content && content.parts;
+
+          if (parts) {
+            for (var i = 0; i < parts.length; i++) {
+              var part = parts[i];
+
+              // Skip thinking parts
+              if (part.thought === true && typeof part.text === 'string') {
+                continue;
+              }
+
+              if (typeof part.text === 'string') {
+                if (!hasText) {
+                  hasText = true;
+                  textAccum = '';
+                }
+                textAccum += part.text;
+                events.push({ type: 'text_delta', text: part.text });
+              }
+
+              if (part.functionCall) {
+                hadToolCalls = true;
+                flushText(events);
+
+                var fc = part.functionCall;
+                var name = fc.name;
+                var args = fc.args || {};
+                var id = 'gemini_tc_' + (toolCallCounter++);
+
+                events.push({ type: 'tool_use_start', toolUseId: id, toolName: name });
+                events.push({ type: 'tool_use_input_delta', toolUseId: id, partialJson: JSON.stringify(args) });
+
+                var doneEvent = { type: 'tool_use_done', toolUseId: id, toolName: name, input: args };
+                if (part.thoughtSignature) {
+                  doneEvent.thoughtSignature = part.thoughtSignature;
+                }
+                events.push(doneEvent);
+              }
+            }
+          }
+
+          var finishReason = candidate.finishReason;
+          if (finishReason) {
+            flushText(events);
+
+            if (finishReason === 'STOP') {
+              events.push({ type: 'turn_end', stopReason: hadToolCalls ? 'tool_use' : 'end_turn' });
+            } else if (finishReason === 'MAX_TOKENS') {
+              events.push({ type: 'turn_end', stopReason: 'max_tokens' });
+            } else if (finishReason === 'SAFETY' || finishReason === 'RECITATION') {
+              events.push({ type: 'error', error: 'Gemini blocked response: ' + finishReason });
+              events.push({ type: 'turn_end', stopReason: 'end_turn' });
+            }
+          }
+        }
+
+        // Usage metadata
+        if (parsed.usageMetadata) {
+          events.push({
+            type: 'usage',
+            usage: {
+              input_tokens: parsed.usageMetadata.promptTokenCount || 0,
+              output_tokens: parsed.usageMetadata.candidatesTokenCount || 0
+            },
+            cost: { inputCost: 0, outputCost: 0, totalCost: 0, currency: 'USD' }
+          });
+        }
+
+        return events;
+      },
+      reset: function() {
+        toolCallCounter = 0;
+        textAccum = '';
+        hasText = false;
+        hadToolCalls = false;
+      }
+    };
+  }
+
   // ===== 4. Request Builders =====
 
   // ---- Gemini Schema Sanitizer ----
@@ -333,6 +438,120 @@
       }
     }
     return result;
+  }
+
+  // ---- Gemini Schema Converter (uppercase types, strip additionalProperties, ensure properties on objects) ----
+  function convertSchemaForGemini(schema) {
+    if (!schema || typeof schema !== 'object') return schema;
+    var result = {};
+    var keys = Object.keys(schema);
+    for (var i = 0; i < keys.length; i++) {
+      if (keys[i] === 'additionalProperties') continue;
+      result[keys[i]] = schema[keys[i]];
+    }
+    // Uppercase type
+    if (typeof result.type === 'string') {
+      result.type = result.type.toUpperCase();
+    }
+    // Bare objects need properties
+    if (result.type === 'OBJECT' && !result.properties) {
+      result.properties = {};
+    }
+    // Recurse into properties
+    if (result.properties && typeof result.properties === 'object') {
+      var newProps = {};
+      var propKeys = Object.keys(result.properties);
+      for (var j = 0; j < propKeys.length; j++) {
+        if (typeof result.properties[propKeys[j]] === 'object' && result.properties[propKeys[j]] !== null) {
+          newProps[propKeys[j]] = convertSchemaForGemini(result.properties[propKeys[j]]);
+        } else {
+          newProps[propKeys[j]] = result.properties[propKeys[j]];
+        }
+      }
+      result.properties = newProps;
+    }
+    // Recurse into items
+    if (result.items && typeof result.items === 'object') {
+      result.items = convertSchemaForGemini(result.items);
+    }
+    return result;
+  }
+
+  // ---- Text-based Tool Call Fallback Parser ----
+  // Some models (Gemini 3 previews) output tool calls as text like "toolname\n{json}"
+  // instead of structured functionCall parts. Detect and convert to proper tool_use blocks.
+  function parseTextToolCalls(contentBlocks, toolNames) {
+    var results = [];
+    for (var i = 0; i < contentBlocks.length; i++) {
+      var block = contentBlocks[i];
+      if (block.type !== 'text') continue;
+      var text = block.text.trim();
+
+      for (var n = 0; n < toolNames.length; n++) {
+        var name = toolNames[n];
+        // Pattern 1: "toolname\n{...}" (tool name on separate line)
+        var prefix = name + '\n';
+        if (text.startsWith(prefix)) {
+          var jsonStr = text.slice(prefix.length).trim();
+          var input = tryParseJsonObj(jsonStr);
+          if (input !== null) {
+            results.push({
+              type: 'tool_use',
+              id: 'text_tool_' + Date.now() + '_' + results.length,
+              name: name,
+              input: input,
+            });
+            break;
+          }
+        }
+        // Pattern 2: tool name appears anywhere followed by \n{...}
+        var idx = text.indexOf(name + '\n');
+        if (idx >= 0) {
+          var afterName = text.slice(idx + name.length + 1).trim();
+          var extracted = extractJsonObj(afterName);
+          if (extracted) {
+            var parsed = tryParseJsonObj(extracted);
+            if (parsed !== null) {
+              results.push({
+                type: 'tool_use',
+                id: 'text_tool_' + Date.now() + '_' + results.length,
+                name: name,
+                input: parsed,
+              });
+              break;
+            }
+          }
+        }
+      }
+    }
+    return results;
+  }
+
+  function tryParseJsonObj(str) {
+    try {
+      var parsed = JSON.parse(str);
+      if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+        return parsed;
+      }
+    } catch(e) {}
+    return null;
+  }
+
+  function extractJsonObj(str) {
+    if (!str.startsWith('{')) return null;
+    var depth = 0;
+    var inString = false;
+    var escape = false;
+    for (var i = 0; i < str.length; i++) {
+      var ch = str[i];
+      if (escape) { escape = false; continue; }
+      if (ch === '\\' && inString) { escape = true; continue; }
+      if (ch === '"') { inString = !inString; continue; }
+      if (inString) continue;
+      if (ch === '{') depth++;
+      if (ch === '}') { depth--; if (depth === 0) return str.slice(0, i + 1); }
+    }
+    return null;
   }
 
   // ---- OpenAI Request Body Builder ----
@@ -420,11 +639,100 @@
     return body;
   }
 
+  // ---- Gemini Request Body Builder ----
+  function buildGeminiRequestBody(agentConfig, messages, tools) {
+    var contents = [];
+    // Track tool_use IDs to names for functionResponse
+    var lastToolUses = {};
+
+    for (var m = 0; m < messages.length; m++) {
+      var msg = messages[m];
+      var role = msg.role === 'assistant' ? 'model' : 'user';
+      var parts = [];
+
+      if (msg.role === 'assistant') {
+        var newToolUses = {};
+        for (var c = 0; c < msg.content.length; c++) {
+          var block = msg.content[c];
+          if (block.type === 'text') {
+            parts.push({ text: block.text });
+          } else if (block.type === 'tool_use') {
+            newToolUses[block.id] = block.name;
+            var fcPart = { functionCall: { name: block.name, args: block.input } };
+            if (block.thoughtSignature) {
+              fcPart.thoughtSignature = block.thoughtSignature;
+            }
+            parts.push(fcPart);
+          }
+        }
+        lastToolUses = newToolUses;
+      } else {
+        // User message
+        for (var c2 = 0; c2 < msg.content.length; c2++) {
+          var block2 = msg.content[c2];
+          if (block2.type === 'text') {
+            parts.push({ text: block2.text });
+          } else if (block2.type === 'tool_result') {
+            var name = lastToolUses[block2.tool_use_id] || 'unknown';
+            var contentStr = typeof block2.content === 'string' ? block2.content : JSON.stringify(block2.content);
+            var response;
+            if (block2.is_error) {
+              response = { error: contentStr };
+            } else {
+              try {
+                var parsed = JSON.parse(contentStr);
+                response = (typeof parsed === 'object' && parsed !== null) ? parsed : { result: contentStr };
+              } catch(e) {
+                response = { result: contentStr };
+              }
+            }
+            parts.push({ functionResponse: { name: name, response: response } });
+          }
+        }
+      }
+
+      if (parts.length === 0) continue;
+
+      // Merge consecutive same-role messages (Gemini requires strict alternation)
+      var last = contents[contents.length - 1];
+      if (last && last.role === role) {
+        last.parts = last.parts.concat(parts);
+      } else {
+        contents.push({ role: role, parts: parts });
+      }
+    }
+
+    var body = { contents: contents };
+
+    if (agentConfig.systemPrompt) {
+      body.system_instruction = { parts: [{ text: agentConfig.systemPrompt }] };
+    }
+
+    body.generationConfig = {
+      maxOutputTokens: agentConfig.maxTokens || 8192
+    };
+
+    if (tools && tools.length > 0) {
+      body.tools = [{
+        functionDeclarations: tools.map(function(t) {
+          return {
+            name: t.name,
+            description: t.description,
+            parameters: convertSchemaForGemini(t.input_schema)
+          };
+        })
+      }];
+      body.toolConfig = { functionCallingConfig: { mode: 'AUTO' } };
+    }
+
+    return body;
+  }
+
   // ===== 5. Streaming =====
 
   // ---- Streaming API request ----
   // Returns an object with an async iterator that yields SSE chunks
-  function sendApiRequest(payload) {
+  function sendApiRequest(payload, endpoint) {
     var id = generateId();
     var handler = {
       chunks: [],
@@ -433,7 +741,7 @@
       notify: null
     };
     streamHandlers[id] = handler;
-    self.postMessage({ type: 'api_request', id: id, payload: payload });
+    self.postMessage({ type: 'api_request', id: id, payload: payload, endpoint: endpoint || undefined });
 
     return {
       [Symbol.asyncIterator]: function() {
@@ -872,7 +1180,14 @@
       }
 
       var provider = agentConfig.provider || 'anthropic';
-      var mapper = (provider === 'anthropic') ? createEventMapper() : createOpenAIEventMapper();
+      var mapper;
+      if (provider === 'anthropic') {
+        mapper = createEventMapper();
+      } else if (provider === 'gemini') {
+        mapper = createGeminiEventMapper();
+      } else {
+        mapper = createOpenAIEventMapper();
+      }
       var parser = createSSEParser();
 
       // Build API request body
@@ -901,6 +1216,8 @@
         };
         if (agentConfig.systemPrompt) body.system = agentConfig.systemPrompt;
         if (tools.length > 0) body.tools = tools;
+      } else if (provider === 'gemini') {
+        body = buildGeminiRequestBody(agentConfig, turnMessages, tools);
       } else {
         body = buildOpenAIRequestBody(agentConfig, turnMessages, tools);
       }
@@ -910,7 +1227,11 @@
       var stopReason = 'end_turn';
 
       try {
-        var stream = sendApiRequest(body);
+        var endpoint;
+        if (provider === 'gemini') {
+          endpoint = '/api/gemini/v1beta/models/' + agentConfig.model + ':streamGenerateContent?alt=sse';
+        }
+        var stream = sendApiRequest(body, endpoint);
         for await (var chunk of stream) {
           // Mid-stream pause check
           while (paused && !stopped) {
@@ -939,6 +1260,7 @@
               } else if (event.type === 'tool_use_done') {
                 var toolUse = { type: 'tool_use', id: event.toolUseId, name: event.toolName, input: event.input };
                 if (event.truncated) toolUse._truncated = true;
+                if (event.thoughtSignature) toolUse.thoughtSignature = event.thoughtSignature;
                 assistantContent.push(toolUse);
                 toolCalls.push(toolUse);
               } else if (event.type === 'turn_end') {
@@ -950,6 +1272,41 @@
       } catch(err) {
         emitEvent({ type: 'error', error: String(err) });
         return;
+      }
+
+      // Fallback: detect tool calls output as text (some models like Gemini 3 previews
+      // output tool calls as text instead of structured functionCall parts).
+      if (toolCalls.length === 0 && assistantContent.length > 0) {
+        var toolNames = tools.map(function(t) { return t.name; });
+        var textToolCalls = parseTextToolCalls(assistantContent, toolNames);
+        if (textToolCalls.length > 0) {
+          // Remove text blocks that contained tool calls — keeping them causes the model
+          // to see both the raw text AND the structured functionCall in history, which
+          // confuses models like Gemini 3 into calling the tool again endlessly.
+          var parsedNames = {};
+          for (var ti2 = 0; ti2 < textToolCalls.length; ti2++) {
+            parsedNames[textToolCalls[ti2].name] = true;
+          }
+          assistantContent = assistantContent.filter(function(block) {
+            if (block.type !== 'text') return true;
+            var text = block.text.trim();
+            for (var tn = 0; tn < toolNames.length; tn++) {
+              if (parsedNames[toolNames[tn]] && text.indexOf(toolNames[tn] + '\n') >= 0) {
+                return false;  // Remove this text block — it was a text-based tool call
+              }
+            }
+            return true;
+          });
+          for (var ti3 = 0; ti3 < textToolCalls.length; ti3++) {
+            assistantContent.push(textToolCalls[ti3]);
+            toolCalls.push(textToolCalls[ti3]);
+            // Emit events so UI shows the tool call
+            emitEvent({ type: 'tool_use_start', toolUseId: textToolCalls[ti3].id, toolName: textToolCalls[ti3].name });
+            emitEvent({ type: 'tool_use_input_delta', toolUseId: textToolCalls[ti3].id, partialJson: JSON.stringify(textToolCalls[ti3].input) });
+            emitEvent({ type: 'tool_use_done', toolUseId: textToolCalls[ti3].id, toolName: textToolCalls[ti3].name, input: textToolCalls[ti3].input });
+          }
+          stopReason = 'tool_use';
+        }
       }
 
       if (assistantContent.length > 0) {

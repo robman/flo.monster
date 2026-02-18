@@ -1,6 +1,5 @@
 import type {
-  Message, ApiToolDef, TokenUsage, ContentBlock,
-  ToolUseContent,
+  Message, ApiToolDef, TokenUsage,
 } from '../types/messages.js';
 import type { AgentConfig } from '../types/agent.js';
 import type { AgentEvent } from '../types/events.js';
@@ -121,61 +120,6 @@ export const OPENAI_MODELS: Record<string, ModelInfo> = {
   },
 };
 
-// Gemini model pricing (per million tokens)
-export const GEMINI_MODELS: Record<string, ModelInfo> = {
-  // Gemini 3 series (preview)
-  'gemini-3-pro-preview': {
-    id: 'gemini-3-pro-preview',
-    displayName: 'Gemini 3 Pro Preview',
-    provider: 'gemini',
-    contextWindow: 1048576,
-    maxOutputTokens: 65536,
-    pricing: { inputPerMillion: 2.0, outputPerMillion: 12.0 },
-  },
-  'gemini-3-flash-preview': {
-    id: 'gemini-3-flash-preview',
-    displayName: 'Gemini 3 Flash Preview',
-    provider: 'gemini',
-    contextWindow: 1048576,
-    maxOutputTokens: 65536,
-    pricing: { inputPerMillion: 0.50, outputPerMillion: 3.0 },
-  },
-  // Gemini 2.5 series
-  'gemini-2.5-pro': {
-    id: 'gemini-2.5-pro',
-    displayName: 'Gemini 2.5 Pro',
-    provider: 'gemini',
-    contextWindow: 1048576,
-    maxOutputTokens: 65536,
-    pricing: { inputPerMillion: 1.25, outputPerMillion: 10.0 },
-  },
-  'gemini-2.5-flash': {
-    id: 'gemini-2.5-flash',
-    displayName: 'Gemini 2.5 Flash',
-    provider: 'gemini',
-    contextWindow: 1048576,
-    maxOutputTokens: 65536,
-    pricing: { inputPerMillion: 0.30, outputPerMillion: 2.50 },
-  },
-  'gemini-2.5-flash-lite': {
-    id: 'gemini-2.5-flash-lite',
-    displayName: 'Gemini 2.5 Flash-Lite',
-    provider: 'gemini',
-    contextWindow: 1048576,
-    maxOutputTokens: 65536,
-    pricing: { inputPerMillion: 0.10, outputPerMillion: 0.40 },
-  },
-  // Gemini 2.0 series (deprecated March 31, 2026)
-  'gemini-2.0-flash': {
-    id: 'gemini-2.0-flash',
-    displayName: 'Gemini 2.0 Flash (Deprecated)',
-    provider: 'gemini',
-    contextWindow: 1048576,
-    maxOutputTokens: 8192,
-    pricing: { inputPerMillion: 0.10, outputPerMillion: 0.40 },
-  },
-};
-
 // State for accumulating streamed OpenAI content
 interface OpenAIStreamState {
   activeToolCalls: Map<number, { id: string; name: string; argsAccum: string }>;
@@ -198,8 +142,6 @@ export function getProviderEndpoint(provider: string): string {
   switch (provider) {
     case 'openai':
       return '/api/openai/v1/chat/completions';
-    case 'gemini':
-      return '/api/gemini/v1beta/openai/chat/completions';
     case 'ollama':
       return '/api/ollama/v1/chat/completions';
     default:
@@ -208,60 +150,13 @@ export function getProviderEndpoint(provider: string): string {
 }
 
 /**
- * Sanitize a JSON Schema for providers that don't support all features.
- * Gemini doesn't support `additionalProperties` in tool schemas,
- * and requires `properties` on all object types (bare `{type:'object'}`
- * without properties causes Gemini to fall back to text-based tool calls).
- */
-export function sanitizeToolSchema(provider: string, schema: Record<string, unknown>): Record<string, unknown> {
-  if (provider !== 'gemini') return schema;
-
-  const sanitized = { ...schema };
-  delete sanitized.additionalProperties;
-
-  // Gemini requires `properties` on object types — bare {type:'object'}
-  // causes function calling to silently fail (model outputs tool calls as text).
-  if (sanitized.type === 'object' && !sanitized.properties) {
-    sanitized.properties = {};
-  }
-
-  // Recurse into properties
-  if (sanitized.properties && typeof sanitized.properties === 'object') {
-    const props = sanitized.properties as Record<string, Record<string, unknown>>;
-    const newProps: Record<string, unknown> = {};
-    for (const [key, value] of Object.entries(props)) {
-      if (typeof value === 'object' && value !== null) {
-        newProps[key] = sanitizeToolSchema(provider, value);
-      } else {
-        newProps[key] = value;
-      }
-    }
-    sanitized.properties = newProps;
-  }
-
-  // Recurse into items (for arrays)
-  if (sanitized.items && typeof sanitized.items === 'object') {
-    sanitized.items = sanitizeToolSchema(provider, sanitized.items as Record<string, unknown>);
-  }
-
-  return sanitized;
-}
-
-/**
  * Convert canonical Anthropic-style messages to OpenAI Chat Completions format.
- *
- * Gemini's OpenAI-compatible API doesn't support tool_calls/tool role in
- * conversation history (returns "Invalid content part type 'tool_use'").
- * For Gemini, we convert tool call turns to text descriptions so the model
- * retains context without relying on the broken history format.
  */
 function convertMessagesToOpenAI(
   messages: Message[],
   systemPrompt?: string,
-  provider?: string,
 ): Array<Record<string, unknown>> {
   const result: Array<Record<string, unknown>> = [];
-  const isGemini = provider === 'gemini';
 
   // System prompt as first message
   if (systemPrompt) {
@@ -275,37 +170,20 @@ function convertMessagesToOpenAI(
       const textBlocks = msg.content.filter(c => c.type === 'text');
 
       if (toolResults.length > 0) {
-        if (isGemini) {
-          // Gemini: convert tool results to user text
-          const parts: string[] = [];
-          for (const tr of toolResults) {
-            if (tr.type === 'tool_result') {
-              const content = typeof tr.content === 'string' ? tr.content : JSON.stringify(tr.content);
-              parts.push(`[Tool result: ${content}]`);
-            }
+        // Each tool_result becomes a separate "tool" role message
+        for (const tr of toolResults) {
+          if (tr.type === 'tool_result') {
+            result.push({
+              role: 'tool',
+              tool_call_id: tr.tool_use_id,
+              content: typeof tr.content === 'string' ? tr.content : JSON.stringify(tr.content),
+            });
           }
-          for (const tb of textBlocks) {
-            if (tb.type === 'text') parts.push(tb.text);
-          }
-          if (parts.length > 0) {
-            result.push({ role: 'user', content: parts.join('\n') });
-          }
-        } else {
-          // Each tool_result becomes a separate "tool" role message
-          for (const tr of toolResults) {
-            if (tr.type === 'tool_result') {
-              result.push({
-                role: 'tool',
-                tool_call_id: tr.tool_use_id,
-                content: typeof tr.content === 'string' ? tr.content : JSON.stringify(tr.content),
-              });
-            }
-          }
-          // Any text blocks alongside tool_results become user messages
-          if (textBlocks.length > 0) {
-            const text = textBlocks.map(b => b.type === 'text' ? b.text : '').join('\n');
-            result.push({ role: 'user', content: text });
-          }
+        }
+        // Any text blocks alongside tool_results become user messages
+        if (textBlocks.length > 0) {
+          const text = textBlocks.map(b => b.type === 'text' ? b.text : '').join('\n');
+          result.push({ role: 'user', content: text });
         }
       } else {
         // Regular user message
@@ -325,19 +203,14 @@ function convertMessagesToOpenAI(
         if (block.type === 'text') {
           textParts.push(block.text);
         } else if (block.type === 'tool_use') {
-          if (isGemini) {
-            // Gemini: convert tool calls to text
-            textParts.push(`[Called tool: ${block.name}(${JSON.stringify(block.input)})]`);
-          } else {
-            toolCalls.push({
-              id: block.id,
-              type: 'function',
-              function: {
-                name: block.name,
-                arguments: JSON.stringify(block.input),
-              },
-            });
-          }
+          toolCalls.push({
+            id: block.id,
+            type: 'function',
+            function: {
+              name: block.name,
+              arguments: JSON.stringify(block.input),
+            },
+          });
         }
       }
 
@@ -369,24 +242,15 @@ export function createOpenAIChatAdapter(): ProviderAdapter {
       config: AgentConfig,
     ): { url: string; headers: Record<string, string>; body: string } {
       const provider = config.provider || 'openai';
-      const openaiMessages = convertMessagesToOpenAI(messages, config.systemPrompt, provider);
-
-      const isGemini = provider === 'gemini';
+      const openaiMessages = convertMessagesToOpenAI(messages, config.systemPrompt);
 
       const body: Record<string, unknown> = {
         model: config.model,
         messages: openaiMessages,
         stream: true,
+        max_completion_tokens: config.maxTokens || 4096,
+        stream_options: { include_usage: true },
       };
-
-      // Gemini's OpenAI-compatible endpoint uses max_tokens, not max_completion_tokens.
-      // It also doesn't support stream_options.
-      if (isGemini) {
-        body.max_tokens = config.maxTokens || 4096;
-      } else {
-        body.max_completion_tokens = config.maxTokens || 4096;
-        body.stream_options = { include_usage: true };
-      }
 
       if (tools.length > 0) {
         body.tools = tools.map((t) => ({
@@ -394,13 +258,9 @@ export function createOpenAIChatAdapter(): ProviderAdapter {
           function: {
             name: t.name,
             description: t.description,
-            parameters: sanitizeToolSchema(provider, t.input_schema as Record<string, unknown>),
+            parameters: t.input_schema,
           },
         }));
-        // Gemini needs explicit tool_choice to enable function calling
-        if (isGemini) {
-          body.tool_choice = 'auto';
-        }
       }
 
       return {
@@ -530,7 +390,7 @@ export function createOpenAIChatAdapter(): ProviderAdapter {
         streamState.activeToolCalls.clear();
 
         // Map finish reason.
-        // Gemini sends finish_reason:"stop" even for tool calls, so if we
+        // Some providers send finish_reason:"stop" even for tool calls, so if we
         // just flushed tool calls, override to 'tool_use' regardless.
         if (finishReason === 'tool_calls' || hadToolCalls) {
           events.push({ type: 'turn_end', stopReason: 'tool_use' });
@@ -556,8 +416,7 @@ export function createOpenAIChatAdapter(): ProviderAdapter {
     },
 
     estimateCost(model: string, usage: TokenUsage): CostEstimate {
-      const allModels = { ...OPENAI_MODELS, ...GEMINI_MODELS };
-      const info = allModels[resolveModelId(model)];
+      const info = OPENAI_MODELS[resolveModelId(model)];
       if (!info) {
         return { inputCost: 0, outputCost: 0, totalCost: 0, currency: 'USD' };
       }

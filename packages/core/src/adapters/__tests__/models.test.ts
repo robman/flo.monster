@@ -156,9 +156,9 @@ describe('Model Registry', () => {
       expect(adapter.id).toBe('openai-chat');
     });
 
-    it('returns openai-chat adapter for gemini', () => {
+    it('returns gemini adapter for gemini', () => {
       const adapter = getAdapter('gemini');
-      expect(adapter.id).toBe('openai-chat');
+      expect(adapter.id).toBe('gemini');
     });
 
     it('returns openai-chat adapter for ollama', () => {

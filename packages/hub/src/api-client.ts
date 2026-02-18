@@ -88,6 +88,8 @@ async function* sendApiRequest(
   if (route.provider === 'anthropic') {
     if (apiKey) upstreamHeaders['x-api-key'] = apiKey;
     upstreamHeaders['anthropic-version'] = '2023-06-01';
+  } else if (route.provider === 'gemini' && apiKey) {
+    upstreamHeaders['x-goog-api-key'] = apiKey;
   } else if (apiKey) {
     upstreamHeaders['Authorization'] = `Bearer ${apiKey}`;
   }

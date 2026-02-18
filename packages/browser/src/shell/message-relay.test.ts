@@ -1221,6 +1221,72 @@ describe('MessageRelay', () => {
       const result = (relay as any).parseAssistantFromSSE('');
       expect(result).toBeNull();
     });
+
+    it('handles \\r\\n line endings in Anthropic SSE stream', () => {
+      const sseText = [
+        'event: content_block_start',
+        'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+        '',
+        'event: content_block_delta',
+        'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}',
+        '',
+        'event: message_delta',
+        'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}',
+        '',
+      ].join('\r\n');
+
+      const result = (relay as any).parseAssistantFromSSE(sseText, 'anthropic');
+      expect(result).not.toBeNull();
+      expect(result.message.content[0]).toEqual({ type: 'text', text: 'Hello' });
+    });
+
+    it('handles \\r\\n line endings in OpenAI SSE stream', () => {
+      const sseText = [
+        'data: {"choices":[{"delta":{"content":"Hi"},"index":0}]}',
+        '',
+        'data: {"choices":[{"delta":{},"finish_reason":"stop","index":0}]}',
+        '',
+        'data: [DONE]',
+        '',
+      ].join('\r\n');
+
+      const result = (relay as any).parseAssistantFromSSE(sseText, 'openai');
+      expect(result).not.toBeNull();
+      expect(result.message.content[0]).toEqual({ type: 'text', text: 'Hi' });
+    });
+
+    it('handles \\r\\n line endings in Gemini SSE stream', () => {
+      const sseText = [
+        'data: {"candidates":[{"content":{"parts":[{"text":"Hello"}],"role":"model"}}]}',
+        '',
+        'data: {"candidates":[{"content":{"parts":[],"role":"model"},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5}}',
+        '',
+      ].join('\r\n');
+
+      const result = (relay as any).parseAssistantFromSSE(sseText, 'gemini');
+      expect(result).not.toBeNull();
+      expect(result.message.content[0]).toEqual({ type: 'text', text: 'Hello' });
+      expect(result.stopReason).toBe('end_turn');
+    });
+
+    it('parses Gemini multi-chunk SSE with function calls', () => {
+      const sseText = [
+        'data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"dom","args":{"action":"create","html":"<p>Hi</p>"}}}],"role":"model"}}]}',
+        '',
+        'data: {"candidates":[{"content":{"parts":[],"role":"model"},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5}}',
+        '',
+      ].join('\r\n');
+
+      const result = (relay as any).parseAssistantFromSSE(sseText, 'gemini');
+      expect(result).not.toBeNull();
+      expect(result.message.content[0]).toEqual({
+        type: 'tool_use',
+        id: expect.stringMatching(/^gemini_tc_/),
+        name: 'dom',
+        input: { action: 'create', html: '<p>Hi</p>' },
+      });
+      expect(result.stopReason).toBe('tool_use');
+    });
   });
 
   describe('srcdoc fetch routes through shared executeFetch', () => {

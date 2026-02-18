@@ -286,8 +286,11 @@ async function handleProviderProxy(
     // Anthropic uses x-api-key header
     if (apiKey) upstreamHeaders['x-api-key'] = apiKey;
     upstreamHeaders['anthropic-version'] = '2023-06-01';
+  } else if (route.provider === 'gemini' && apiKey) {
+    // Gemini uses x-goog-api-key header
+    upstreamHeaders['x-goog-api-key'] = apiKey;
   } else if (apiKey) {
-    // OpenAI, Gemini, Ollama (when key exists) use Bearer token
+    // OpenAI, Ollama (when key exists) use Bearer token
     upstreamHeaders['Authorization'] = `Bearer ${apiKey}`;
   }
 

@@ -1,6 +1,7 @@
 import type { ProviderAdapter, ModelInfo } from '../types/provider.js';
 import { createAnthropicAdapter, MODEL_INFO as ANTHROPIC_MODELS } from './anthropic.js';
-import { createOpenAIChatAdapter, OPENAI_MODELS, GEMINI_MODELS } from './openai.js';
+import { createOpenAIChatAdapter, OPENAI_MODELS } from './openai.js';
+import { createGeminiAdapter, GEMINI_MODELS } from './gemini.js';
 export { MODEL_ALIASES, resolveModelId } from './model-aliases.js';
 import { resolveModelId } from './model-aliases.js';
 
@@ -41,8 +42,9 @@ export function getProviderForModel(modelId: string): string {
  */
 export function getAdapter(provider: string): ProviderAdapter {
   switch (provider) {
-    case 'openai':
     case 'gemini':
+      return createGeminiAdapter();
+    case 'openai':
     case 'ollama':
       return createOpenAIChatAdapter();
     case 'anthropic':

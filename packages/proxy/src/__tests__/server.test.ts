@@ -172,14 +172,14 @@ describe('CORS Proxy', () => {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': 'Bearer gemini-key-test',
+        'x-goog-api-key': 'gemini-key-test',
       },
       body,
     });
     expect(res.status).toBe(200);
     expect(lastMockRequest).not.toBeNull();
     expect(lastMockRequest!.url).toBe('/v1beta/openai/chat/completions');
-    expect(lastMockRequest!.headers['authorization']).toBe('Bearer gemini-key-test');
+    expect(lastMockRequest!.headers['x-goog-api-key']).toBe('gemini-key-test');
     const text = await res.text();
     expect(text).toContain('Hey');
   });

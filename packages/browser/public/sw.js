@@ -307,7 +307,7 @@ async function handleApiProxy(request) {
   // and the hub injects them server-side.
   if (hubMode && hubHttpUrl) {
     // Route to hub HTTP endpoint
-    const hubUrl = hubHttpUrl + url.pathname;
+    const hubUrl = hubHttpUrl + url.pathname + url.search;
     headers.set('x-hub-token', hubToken);
     headers.set('x-api-provider', provider);
     // Only set anthropic-version for Anthropic provider
@@ -350,7 +350,7 @@ async function handleApiProxy(request) {
   // Used when user has browser-side API keys (Modes 1 & 2).
   if (apiBaseUrl) {
     // Rewrite /api/anthropic/v1/messages → https://api.flo.monster/anthropic/v1/messages
-    const externalUrl = apiBaseUrl + url.pathname.replace(/^\/api/, '');
+    const externalUrl = apiBaseUrl + url.pathname.replace(/^\/api/, '') + url.search;
 
     // Inject provider-specific auth headers
     const key = apiKeys[provider];
@@ -358,6 +358,8 @@ async function handleApiProxy(request) {
       if (provider === 'anthropic') {
         headers.set('x-api-key', key);
         headers.set('anthropic-version', '2023-06-01');
+      } else if (provider === 'gemini') {
+        headers.set('x-goog-api-key', key);
       } else {
         headers.set('Authorization', 'Bearer ' + key);
       }
@@ -391,6 +393,8 @@ async function handleApiProxy(request) {
     if (provider === 'anthropic') {
       headers.set('x-api-key', key);
       headers.set('anthropic-version', '2023-06-01');
+    } else if (provider === 'gemini') {
+      headers.set('x-goog-api-key', key);
     } else {
       headers.set('Authorization', `Bearer ${key}`);
     }

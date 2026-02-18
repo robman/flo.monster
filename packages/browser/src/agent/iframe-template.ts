@@ -1109,7 +1109,7 @@ export function generateBootstrapScript(agentId: string): string {
         // Include workerId so shell can route events
         relayToShell({ type: 'event', workerId: workerId, event: msg.event });
       } else if (msg.type === 'api_request') {
-        trackAndRelay({ type: 'api_request', id: msg.id, payload: msg.payload }, workerId);
+        trackAndRelay({ type: 'api_request', id: msg.id, payload: msg.payload, endpoint: msg.endpoint }, workerId);
       } else if (msg.type === 'storage_request') {
         trackAndRelay({ type: 'storage_request', id: msg.id, action: msg.action, key: msg.key, value: msg.value }, workerId);
       } else if (msg.type === 'file_request') {

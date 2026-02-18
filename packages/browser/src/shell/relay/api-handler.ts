@@ -24,7 +24,7 @@ export type HubStreamFn = (
  * Provider-specific paths:
  *   anthropic -> /api/anthropic/v1/messages
  *   openai    -> /api/openai/v1/chat/completions
- *   gemini    -> /api/gemini/v1beta/openai/chat/completions
+ *   gemini    -> /api/gemini/v1beta/openai/chat/completions (OpenAI-compat fallback; native Gemini uses dynamic URL via msg.endpoint)
  *   ollama    -> /api/ollama/v1/chat/completions
  */
 export function getApiEndpoint(provider: string, proxySettings: ProxySettings): string {
@@ -78,8 +78,21 @@ export async function handleApiRequest(
     // Load terse entries for context building
     const terseEntries = await loadTerseContext(agentId, getProvider);
 
-    // The request's messages are the current turn messages — tag with turnId
-    const turnMessages = (payload.messages || []).map((m: Record<string, unknown>) => ({ ...m, turnId }));
+    // Gemini native format uses `contents` instead of `messages`.
+    // Detect which field to use based on the payload structure.
+    const isGeminiNative = !payload.messages && Array.isArray(payload.contents);
+
+    // The request's messages/contents are the current turn — tag with turnId.
+    const rawTurnItems = (isGeminiNative ? payload.contents : payload.messages) || [];
+    // Keep original format for the current request
+    const turnMessages = rawTurnItems.map((m: Record<string, unknown>) => ({ ...m, turnId }));
+    // For storage: normalize Gemini messages to canonical format (role: assistant/user, content blocks)
+    // so context works when switching providers. Also filter out system messages — the worker
+    // injects the system prompt on every request, so storing it duplicates it each turn.
+    const turnMessagesForStorage = (isGeminiNative
+      ? rawTurnItems.map((m: Record<string, unknown>) => ({ ...normalizeGeminiMessage(m), turnId }))
+      : turnMessages
+    ).filter((m: Record<string, unknown>) => m.role !== 'system');
 
     // Build context messages using the unified strategy
     const contextMessages = buildContextMessages(
@@ -88,17 +101,59 @@ export async function handleApiRequest(
       { contextMode, maxTerseEntries: 50, fullContextTurns },
     );
 
-    // Send context + current turn to the API (strip turnId — APIs reject extra fields)
-    payload.messages = [...contextMessages, ...turnMessages].map(
-      ({ turnId: _tid, ...rest }: Record<string, unknown>) => rest
-    );
+    if (isGeminiNative) {
+      // Gemini native: context messages are in internal format (role/content blocks).
+      // Convert them to Gemini contents format before prepending.
+      const contextContents = contextMessages.map((m: Record<string, unknown>) => {
+        const role = m.role === 'assistant' ? 'model' : 'user';
+        const content = m.content as Array<Record<string, unknown>> | undefined;
+        const parts: Array<Record<string, unknown>> = [];
+        if (content) {
+          for (const block of content) {
+            if (block.type === 'text') {
+              parts.push({ text: block.text });
+            }
+            // Tool use/result blocks in context are best represented as text summaries
+            // since we don't have the full functionCall/Response metadata.
+          }
+        }
+        return parts.length > 0 ? { role, parts } : null;
+      }).filter(Boolean);
+
+      // Merge context + turn contents, ensuring role alternation
+      const allContents: Array<Record<string, unknown>> = [];
+      for (const item of [...contextContents, ...turnMessages]) {
+        const typedItem = item as Record<string, unknown>;
+        const last = allContents[allContents.length - 1];
+        if (last && last.role === typedItem.role) {
+          // Merge consecutive same-role entries
+          (last.parts as Array<Record<string, unknown>>).push(
+            ...(typedItem.parts as Array<Record<string, unknown>>),
+          );
+        } else {
+          allContents.push({ ...typedItem });
+        }
+      }
+      // Strip turnId from contents
+      payload.contents = allContents.map(
+        ({ turnId: _tid, ...rest }: Record<string, unknown>) => rest,
+      );
+    } else {
+      // OpenAI/Anthropic: inject context into messages array
+      payload.messages = [...contextMessages, ...turnMessages].map(
+        ({ turnId: _tid, ...rest }: Record<string, unknown>) => rest,
+      );
+    }
+
+    // Use worker-provided endpoint (e.g. native Gemini URL) or fall back to static provider path
+    const apiEndpoint = (msg.endpoint as string) || getApiEndpoint(provider, proxySettings);
 
     if (hubStream) {
       // Mode 3: stream through hub WebSocket
       let fullResponseText = '';
 
       await new Promise<void>((resolve, reject) => {
-        hubStream(provider, getApiEndpoint(provider, proxySettings), payload, {
+        hubStream(provider, apiEndpoint, payload, {
           onChunk: (chunk: string) => {
             fullResponseText += chunk;
             target.postMessage({
@@ -117,7 +172,7 @@ export async function handleApiRequest(
       if (parsed && parsed.message) {
         if (parsed.stopReason !== 'tool_use') {
           const taggedResponse = { ...parsed.message, turnId };
-          const fullHistory = [...storedMessages, ...turnMessages, taggedResponse];
+          const fullHistory = [...storedMessages, ...turnMessagesForStorage, taggedResponse];
           await saveConversationContext(agentId, fullHistory, getProvider);
           const terseSummary = extractTerseSummary(parsed.message);
           if (terseSummary) {
@@ -132,7 +187,6 @@ export async function handleApiRequest(
       } satisfies ShellToIframe, '*');
     } else {
       // Modes 1/2: direct fetch (existing path)
-      const apiEndpoint = getApiEndpoint(provider, proxySettings);
       const response = await fetch(apiEndpoint, {
         method: 'POST',
         headers: {
@@ -182,7 +236,7 @@ export async function handleApiRequest(
         // Only save context when the turn is complete (not tool_use)
         if (parsed.stopReason !== 'tool_use') {
           const taggedResponse = { ...parsed.message, turnId };
-          const fullHistory = [...storedMessages, ...turnMessages, taggedResponse];
+          const fullHistory = [...storedMessages, ...turnMessagesForStorage, taggedResponse];
           await saveConversationContext(agentId, fullHistory, getProvider);
           const terseSummary = extractTerseSummary(parsed.message);
           if (terseSummary) {
@@ -206,13 +260,16 @@ export async function handleApiRequest(
 }
 
 export function parseAssistantFromSSE(sseText: string, provider: string = 'anthropic'): { message: Record<string, unknown>; stopReason: string } | null {
+  if (provider === 'gemini') {
+    return parseGeminiAssistantFromSSE(sseText);
+  }
   if (provider !== 'anthropic') {
     return parseOpenAIAssistantFromSSE(sseText);
   }
   // Parse Anthropic SSE events -- look for content blocks and stop_reason
   const contentBlocks: unknown[] = [];
   let stopReason = 'end_turn';
-  const lines = sseText.split('\n');
+  const lines = sseText.split('\n').map(l => l.replace(/\r$/, ''));
   let currentEvent = '';
   let currentData = '';
 
@@ -272,7 +329,7 @@ function parseOpenAIAssistantFromSSE(sseText: string): { message: Record<string,
   let currentText = '';
   const toolCalls: Record<number, { id: string; name: string; argsAccum: string }> = {};
 
-  const lines = sseText.split('\n');
+  const lines = sseText.split('\n').map(l => l.replace(/\r$/, ''));
   let currentData = '';
 
   for (const line of lines) {
@@ -335,6 +392,111 @@ function parseOpenAIAssistantFromSSE(sseText: string): { message: Record<string,
 
   if (contentBlocks.length === 0) return null;
   return { message: { role: 'assistant', content: contentBlocks }, stopReason };
+}
+
+/**
+ * Parse Gemini native SSE stream into canonical ContentBlock[] format.
+ * Gemini uses `candidates[0].content.parts` with `text`, `functionCall` parts
+ * and `finishReason` instead of OpenAI's `choices[0].delta`.
+ */
+function parseGeminiAssistantFromSSE(sseText: string): { message: Record<string, unknown>; stopReason: string } | null {
+  const contentBlocks: unknown[] = [];
+  let stopReason = 'end_turn';
+  let currentText = '';
+  let toolCallCounter = 0;
+
+  const lines = sseText.split('\n').map(l => l.replace(/\r$/, ''));
+  let currentData = '';
+
+  for (const line of lines) {
+    if (line.startsWith('data: ')) {
+      currentData = line.slice(6);
+    } else if (line.startsWith('data:')) {
+      currentData = line.slice(5).trimStart();
+    } else if (line === '' && currentData) {
+      try {
+        const parsed = JSON.parse(currentData);
+        const candidates = parsed.candidates;
+        if (candidates && candidates.length > 0) {
+          const candidate = candidates[0];
+          const parts = candidate.content?.parts;
+
+          if (parts) {
+            for (const part of parts) {
+              // Skip thinking parts
+              if (part.thought === true) continue;
+
+              if (typeof part.text === 'string') {
+                currentText += part.text;
+              }
+              if (part.functionCall) {
+                const fc = part.functionCall;
+                contentBlocks.push({
+                  type: 'tool_use',
+                  id: `gemini_tc_${toolCallCounter++}`,
+                  name: fc.name,
+                  input: fc.args || {},
+                  ...(part.thoughtSignature ? { thoughtSignature: part.thoughtSignature } : {}),
+                });
+              }
+            }
+          }
+
+          const finishReason = candidate.finishReason;
+          if (finishReason === 'STOP') {
+            stopReason = contentBlocks.length > 0 ? 'tool_use' : 'end_turn';
+          } else if (finishReason === 'MAX_TOKENS') {
+            stopReason = 'max_tokens';
+          }
+        }
+      } catch {
+        // Skip unparseable events
+      }
+      currentData = '';
+    }
+  }
+
+  // Add text block first (before tool calls)
+  if (currentText) {
+    contentBlocks.unshift({ type: 'text', text: currentText });
+  }
+
+  if (contentBlocks.length === 0) return null;
+  return { message: { role: 'assistant', content: contentBlocks }, stopReason };
+}
+
+/**
+ * Normalize a Gemini-format message (role: model, parts) to canonical format
+ * (role: assistant/user, content blocks) for cross-provider context storage.
+ */
+function normalizeGeminiMessage(m: Record<string, unknown>): Record<string, unknown> {
+  const role = m.role === 'model' ? 'assistant' : (m.role as string) || 'user';
+  const parts = m.parts as Array<Record<string, unknown>> | undefined;
+  if (!parts) return { role, content: [] };
+
+  const content: Array<Record<string, unknown>> = [];
+  for (const part of parts) {
+    if (typeof part.text === 'string') {
+      if (part.text) content.push({ type: 'text', text: part.text });
+    } else if (part.functionCall) {
+      const fc = part.functionCall as Record<string, unknown>;
+      content.push({
+        type: 'tool_use',
+        id: `gemini_ctx_${Date.now()}_${content.length}`,
+        name: fc.name,
+        input: fc.args || {},
+        ...(part.thoughtSignature ? { thoughtSignature: part.thoughtSignature } : {}),
+      });
+    } else if (part.functionResponse) {
+      const fr = part.functionResponse as Record<string, unknown>;
+      content.push({
+        type: 'tool_result',
+        tool_use_id: `gemini_ctx_${Date.now()}_${content.length}`,
+        content: JSON.stringify(fr.response || {}),
+      });
+    }
+  }
+  return { role, content };
 }
 
 export async function loadConversationContext(

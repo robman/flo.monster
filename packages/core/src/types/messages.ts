@@ -17,6 +17,7 @@ export interface ToolUseContent {
   id: string;
   name: string;
   input: Record<string, unknown>;
+  thoughtSignature?: string;
 }
 
 export interface ToolResultContent {

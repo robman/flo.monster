@@ -142,7 +142,7 @@ export async function runAgenticLoop(
     const { url, headers, body } = deps.adapter.buildRequest(messages, tools, config);
 
     const parser = new SSEParser();
-    const assistantContent: ContentBlock[] = [];
+    let assistantContent: ContentBlock[] = [];
     let stopReason: string = 'end_turn';
     const toolCalls: ToolUseContent[] = [];
 
@@ -188,6 +188,9 @@ export async function runAgenticLoop(
                   name: event.toolName,
                   input: event.input,
                 };
+                if (event.thoughtSignature) {
+                  toolUse.thoughtSignature = event.thoughtSignature;
+                }
                 assistantContent.push(toolUse);
                 toolCalls.push(toolUse);
               } else if (event.type === 'turn_end') {
@@ -209,8 +212,17 @@ export async function runAgenticLoop(
       const toolNames = new Set(tools.map(t => t.name));
       const parsed = parseTextToolCalls(assistantContent, toolNames);
       if (parsed.length > 0) {
-        // Replace text blocks with proper tool_use blocks
-        // Keep any text that wasn't part of a tool call
+        // Remove text blocks that contained tool calls — keeping them causes the model
+        // to see both the raw text AND the structured call in history, leading to loops.
+        const parsedNames = new Set(parsed.map(tc => tc.name));
+        assistantContent = assistantContent.filter(block => {
+          if (block.type !== 'text') return true;
+          const text = block.text.trim();
+          for (const name of parsedNames) {
+            if (text.includes(name + '\n')) return false;
+          }
+          return true;
+        });
         for (const tc of parsed) {
           assistantContent.push(tc);
           toolCalls.push(tc);

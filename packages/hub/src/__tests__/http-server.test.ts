@@ -747,7 +747,7 @@ describe('HTTP Server', () => {
       expect(options.headers['anthropic-version']).toBeUndefined();
     });
 
-    it('should proxy Gemini requests with Bearer auth', async () => {
+    it('should proxy Gemini requests with x-goog-api-key auth', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
         status: 200,
@@ -771,8 +771,9 @@ describe('HTTP Server', () => {
 
       const [url, options] = mockFetch.mock.calls[0];
       expect(url).toBe('https://generativelanguage.googleapis.com/v1beta/openai/chat/completions');
-      expect(options.headers['Authorization']).toBe('Bearer gemini-test-key-789');
-      // Must NOT have Anthropic-specific headers
+      expect(options.headers['x-goog-api-key']).toBe('gemini-test-key-789');
+      // Must NOT have Anthropic-specific or OpenAI-style headers
+      expect(options.headers['Authorization']).toBeUndefined();
       expect(options.headers['x-api-key']).toBeUndefined();
       expect(options.headers['anthropic-version']).toBeUndefined();
     });

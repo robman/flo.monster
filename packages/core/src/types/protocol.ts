@@ -75,7 +75,7 @@ export interface HubAgentSummary {
 
 // Worker → Iframe messages
 export type WorkerToIframe =
-  | { type: 'api_request'; id: string; payload: unknown }
+  | { type: 'api_request'; id: string; payload: unknown; endpoint?: string }
   | { type: 'dom_command'; id: string; command: DomCommand }
   | { type: 'runjs_iframe'; id: string; code: string }
   | { type: 'tool_execute'; id: string; name: string; input: Record<string, unknown> }
@@ -125,7 +125,7 @@ export type IframeToWorker =
 
 // Iframe → Shell messages
 export type IframeToShell =
-  | { type: 'api_request'; id: string; agentId: string; payload: unknown; browserId?: string }
+  | { type: 'api_request'; id: string; agentId: string; payload: unknown; endpoint?: string; browserId?: string }
   | { type: 'storage_request'; id: string; agentId: string; action: string; key?: string; value?: unknown }
   | { type: 'file_request'; id: string; agentId: string; action: string; path: string; content?: string }
   | { type: 'fetch_request'; id: string; agentId: string; url: string; options?: RequestInit }

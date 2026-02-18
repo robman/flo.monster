@@ -35,6 +35,7 @@ export interface ToolUseDoneEvent {
   toolUseId: string;
   toolName: string;
   input: Record<string, unknown>;
+  thoughtSignature?: string;
 }
 
 export interface ToolResultEvent {

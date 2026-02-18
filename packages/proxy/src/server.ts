@@ -15,7 +15,7 @@ const UPSTREAMS: Record<string, string> = {
 const CORS_HEADERS: Record<string, string> = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, x-api-key, anthropic-version, anthropic-dangerous-direct-browser-access, anthropic-beta, Authorization',
+  'Access-Control-Allow-Headers': 'Content-Type, x-api-key, anthropic-version, anthropic-dangerous-direct-browser-access, anthropic-beta, Authorization, x-goog-api-key',
   'Access-Control-Expose-Headers': '*',
 };
 
@@ -28,11 +28,14 @@ const FORWARDED_HEADERS_ANTHROPIC = [
   'anthropic-beta',
 ];
 
-/** Headers to forward for OpenAI-compatible requests (OpenAI, Gemini) */
+/** Headers to forward for OpenAI-compatible requests (OpenAI) */
 const FORWARDED_HEADERS_OPENAI = [
   'content-type',
   'authorization',
 ];
+
+/** Headers to forward for Gemini native requests */
+const FORWARDED_HEADERS_GEMINI = ['content-type', 'x-goog-api-key'];
 
 /**
  * Parse the incoming request URL to determine the provider and upstream path.
@@ -42,6 +45,7 @@ const FORWARDED_HEADERS_OPENAI = [
  *   /anthropic/v1/messages                → anthropic, /v1/messages
  *   /openai/v1/chat/completions           → openai, /v1/chat/completions
  *   /gemini/v1beta/openai/chat/completions → gemini, /v1beta/openai/chat/completions
+ *   /gemini/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse → gemini, /v1beta/models/...
  *   /v1/messages                          → anthropic, /v1/messages (backwards compat)
  */
 export function parseRoute(reqUrl: string): { provider: string; upstreamPath: string } | null {
@@ -106,7 +110,11 @@ export function createProxyServer(port: number = PORT, upstream: string = UPSTRE
     const makeRequest = isHttps ? httpsRequest : httpRequest;
 
     // Select the correct header forwarding list
-    const headerList = route.provider === 'anthropic' ? FORWARDED_HEADERS_ANTHROPIC : FORWARDED_HEADERS_OPENAI;
+    const headerList = route.provider === 'anthropic'
+      ? FORWARDED_HEADERS_ANTHROPIC
+      : route.provider === 'gemini'
+        ? FORWARDED_HEADERS_GEMINI
+        : FORWARDED_HEADERS_OPENAI;
 
     // Collect request body
     const chunks: Buffer[] = [];

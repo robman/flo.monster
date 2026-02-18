@@ -1,7 +1,8 @@
 export * from './types/index.js';
 export { SSEParser } from './stream/sse-parser.js';
 export { createAnthropicAdapter, MODEL_INFO } from './adapters/anthropic.js';
-export { createOpenAIChatAdapter, OPENAI_MODELS, GEMINI_MODELS, getProviderEndpoint, sanitizeToolSchema } from './adapters/openai.js';
+export { createOpenAIChatAdapter, OPENAI_MODELS, getProviderEndpoint } from './adapters/openai.js';
+export { createGeminiAdapter, GEMINI_MODELS, convertToolSchema } from './adapters/gemini.js';
 export { ALL_MODELS, MODEL_ALIASES, resolveModelId, getModelsForProvider, getModelInfo, getProviderForModel, getAdapter, getAvailableProviders } from './adapters/models.js';
 export { runAgenticLoop } from './loop/agentic-loop.js';
 export type { LoopDeps } from './loop/agentic-loop.js';

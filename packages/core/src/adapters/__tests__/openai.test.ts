@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { createOpenAIChatAdapter, OPENAI_MODELS, GEMINI_MODELS, getProviderEndpoint, sanitizeToolSchema } from '../openai.js';
+import { createOpenAIChatAdapter, OPENAI_MODELS, getProviderEndpoint } from '../openai.js';
 import type { Message, ApiToolDef, TokenUsage } from '../../types/messages.js';
 import type { AgentConfig } from '../../types/agent.js';
 import type { ProviderAdapter, SSEEvent } from '../../types/provider.js';
@@ -42,14 +42,6 @@ describe('OpenAI Chat Adapter', () => {
       expect(body.messages[0].content).toBe('Hello');
     });
 
-    it('uses correct endpoint for gemini provider', () => {
-      const messages: Message[] = [
-        { role: 'user', content: [{ type: 'text', text: 'Hello' }] },
-      ];
-      const result = adapter.buildRequest(messages, [], makeConfig({ provider: 'gemini', model: 'gemini-2.0-flash' }));
-      expect(result.url).toBe('/api/gemini/v1beta/openai/chat/completions');
-    });
-
     it('uses correct endpoint for ollama provider', () => {
       const messages: Message[] = [
         { role: 'user', content: [{ type: 'text', text: 'Hello' }] },
@@ -76,35 +68,11 @@ describe('OpenAI Chat Adapter', () => {
       expect(body.messages[0].role).toBe('user');
     });
 
-    it('uses max_tokens for gemini instead of max_completion_tokens', () => {
-      const result = adapter.buildRequest([], [], makeConfig({ provider: 'gemini', model: 'gemini-2.5-flash' }));
-      const body = JSON.parse(result.body);
-      expect(body.max_tokens).toBe(4096);
-      expect(body.max_completion_tokens).toBeUndefined();
-    });
-
-    it('omits stream_options for gemini', () => {
-      const result = adapter.buildRequest([], [], makeConfig({ provider: 'gemini', model: 'gemini-2.5-flash' }));
-      const body = JSON.parse(result.body);
-      expect(body.stream_options).toBeUndefined();
-    });
-
     it('includes stream_options for openai', () => {
       const result = adapter.buildRequest([], [], makeConfig());
       const body = JSON.parse(result.body);
       expect(body.stream_options).toEqual({ include_usage: true });
       expect(body.max_completion_tokens).toBe(4096);
-    });
-
-    it('sets tool_choice auto for gemini when tools provided', () => {
-      const tools: ApiToolDef[] = [{
-        name: 'test',
-        description: 'Test tool',
-        input_schema: { type: 'object', properties: { x: { type: 'string' } }, required: ['x'] },
-      }];
-      const result = adapter.buildRequest([], tools, makeConfig({ provider: 'gemini', model: 'gemini-2.5-flash' }));
-      const body = JSON.parse(result.body);
-      expect(body.tool_choice).toBe('auto');
     });
 
     it('does not set tool_choice for openai', () => {
@@ -169,41 +137,7 @@ describe('OpenAI Chat Adapter', () => {
       expect(body.messages[0].content).toBe('4');
     });
 
-    it('converts tool history to text for gemini', () => {
-      const messages: Message[] = [
-        { role: 'user', content: [{ type: 'text', text: 'check caps' }] },
-        {
-          role: 'assistant',
-          content: [
-            { type: 'tool_use', id: 'tu_1', name: 'capabilities', input: {} },
-          ],
-        },
-        {
-          role: 'user',
-          content: [{ type: 'tool_result', tool_use_id: 'tu_1', content: '{"mode":"browser"}' }],
-        },
-        { role: 'user', content: [{ type: 'text', text: 'now do something' }] },
-      ];
-      const result = adapter.buildRequest(messages, [], makeConfig({ provider: 'gemini', model: 'gemini-2.5-flash' }));
-      const body = JSON.parse(result.body);
-      // System prompt + 4 messages
-      const msgs = body.messages.filter((m: any) => m.role !== 'system');
-
-      // Assistant message should have text, NOT tool_calls
-      const assistantMsg = msgs.find((m: any) => m.role === 'assistant');
-      expect(assistantMsg.content).toContain('[Called tool: capabilities({})]');
-      expect(assistantMsg.tool_calls).toBeUndefined();
-
-      // Tool result should be user message, NOT tool role
-      const toolResultMsg = msgs.find((m: any) => m.role === 'user' && m.content?.includes('[Tool result:'));
-      expect(toolResultMsg).toBeDefined();
-      expect(toolResultMsg.content).toContain('{"mode":"browser"}');
-
-      // No tool role messages
-      expect(msgs.filter((m: any) => m.role === 'tool')).toHaveLength(0);
-    });
-
-    it('keeps tool_calls format for openai (not gemini)', () => {
+    it('keeps tool_calls format for openai', () => {
       const messages: Message[] = [
         { role: 'user', content: [{ type: 'text', text: 'check caps' }] },
         {
@@ -346,15 +280,15 @@ describe('OpenAI Chat Adapter', () => {
       }
     });
 
-    it('maps finish_reason stop to tool_use when tool calls were made (Gemini compat)', () => {
-      // Gemini sends finish_reason:"stop" even when making tool calls
+    it('maps finish_reason stop to tool_use when tool calls were made', () => {
+      // Some providers send finish_reason:"stop" even when making tool calls
       adapter.parseSSEEvent({
         data: '{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"dom","arguments":""}}]}}]}',
       });
       adapter.parseSSEEvent({
         data: '{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"action\\":\\"create\\"}"}}]}}]}',
       });
-      // Gemini sends "stop" instead of "tool_calls"
+      // Provider sends "stop" instead of "tool_calls"
       const events = adapter.parseSSEEvent({
         data: '{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
       });
@@ -399,14 +333,6 @@ describe('OpenAI Chat Adapter', () => {
       expect(cost.outputCost).toBeCloseTo(0.005);
       expect(cost.totalCost).toBeCloseTo(0.0075);
       expect(cost.currency).toBe('USD');
-    });
-
-    it('returns correct values for Gemini models', () => {
-      const usage: TokenUsage = { input_tokens: 1000000, output_tokens: 500000 };
-      const cost = adapter.estimateCost('gemini-2.0-flash', usage);
-      expect(cost.inputCost).toBeCloseTo(0.1);
-      expect(cost.outputCost).toBeCloseTo(0.2);
-      expect(cost.totalCost).toBeCloseTo(0.3);
     });
 
     it('returns zeros for unknown model', () => {
@@ -456,98 +382,8 @@ describe('getProviderEndpoint', () => {
   it('returns correct endpoints', () => {
     expect(getProviderEndpoint('anthropic')).toBe('/api/anthropic/v1/messages');
     expect(getProviderEndpoint('openai')).toBe('/api/openai/v1/chat/completions');
-    expect(getProviderEndpoint('gemini')).toBe('/api/gemini/v1beta/openai/chat/completions');
     expect(getProviderEndpoint('ollama')).toBe('/api/ollama/v1/chat/completions');
     expect(getProviderEndpoint('unknown')).toBe('/api/anthropic/v1/messages');
-  });
-});
-
-describe('sanitizeToolSchema', () => {
-  it('strips additionalProperties for gemini', () => {
-    const schema = {
-      type: 'object',
-      properties: {
-        code: { type: 'string' },
-      },
-      additionalProperties: false,
-    };
-    const result = sanitizeToolSchema('gemini', schema);
-    expect(result.additionalProperties).toBeUndefined();
-    expect(result.type).toBe('object');
-  });
-
-  it('leaves schema unchanged for non-gemini', () => {
-    const schema = {
-      type: 'object',
-      properties: {
-        code: { type: 'string' },
-      },
-      additionalProperties: false,
-    };
-    const result = sanitizeToolSchema('openai', schema);
-    expect(result.additionalProperties).toBe(false);
-  });
-
-  it('adds properties to bare object types for gemini', () => {
-    const schema = {
-      type: 'object',
-      properties: {
-        attributes: { type: 'object' },
-        name: { type: 'string' },
-      },
-    };
-    const result = sanitizeToolSchema('gemini', schema);
-    expect((result.properties as any).attributes.properties).toEqual({});
-    expect((result.properties as any).name.type).toBe('string');
-  });
-
-  it('does not overwrite existing properties on object types', () => {
-    const schema = {
-      type: 'object',
-      properties: {
-        options: { type: 'object', properties: { debounce: { type: 'number' } } },
-      },
-    };
-    const result = sanitizeToolSchema('gemini', schema);
-    expect((result.properties as any).options.properties).toEqual({ debounce: { type: 'number' } });
-  });
-
-  it('handles deeply nested bare objects for gemini', () => {
-    const schema = {
-      type: 'object',
-      properties: {
-        outer: {
-          type: 'object',
-          properties: {
-            inner: { type: 'object' },
-          },
-        },
-      },
-    };
-    const result = sanitizeToolSchema('gemini', schema);
-    const inner = (result.properties as any).outer.properties.inner;
-    expect(inner.properties).toEqual({});
-  });
-
-  it('recurses into nested properties', () => {
-    const schema = {
-      type: 'object',
-      properties: {
-        nested: {
-          type: 'object',
-          additionalProperties: false,
-          properties: {
-            deep: { type: 'string', additionalProperties: false },
-          },
-        },
-      },
-      additionalProperties: false,
-    };
-    const result = sanitizeToolSchema('gemini', schema);
-    expect(result.additionalProperties).toBeUndefined();
-    const nested = (result.properties as any).nested;
-    expect(nested.additionalProperties).toBeUndefined();
-    expect((nested.properties as any).deep.additionalProperties).toBeUndefined();
   });
 });
 
@@ -557,12 +393,5 @@ describe('Model Info', () => {
     expect(OPENAI_MODELS['gpt-4o'].provider).toBe('openai');
     expect(OPENAI_MODELS['gpt-4o-mini']).toBeDefined();
     expect(OPENAI_MODELS['o3-mini']).toBeDefined();
-  });
-
-  it('has correct Gemini models', () => {
-    expect(GEMINI_MODELS['gemini-2.0-flash']).toBeDefined();
-    expect(GEMINI_MODELS['gemini-2.0-flash'].provider).toBe('gemini');
-    expect(GEMINI_MODELS['gemini-2.5-flash']).toBeDefined();
-    expect(GEMINI_MODELS['gemini-2.5-pro']).toBeDefined();
   });
 });
