@@ -194,6 +194,30 @@ cmd_info() {
     echo "  5. Click Connect"
   fi
   echo
+
+  # Check if sharedApiKeys is configured
+  local has_shared_keys
+  has_shared_keys="$(echo "$json" | grep -c '"sharedApiKeys"' || true)"
+  if [[ "$has_shared_keys" -eq 0 ]]; then
+    hr
+    echo "  API Keys:"
+    hr
+    echo
+    echo "  No shared API keys configured. You can either:"
+    echo "  a) Enter your API key in the browser (it stays in your browser)"
+    echo "  b) Add shared keys to hub.json:"
+    echo
+    echo "     sudo nano ${HUB_JSON_PATH}"
+    echo
+    echo '     Add a "sharedApiKeys" section:'
+    echo '     "sharedApiKeys": {'
+    echo '       "anthropic": "sk-ant-..."'
+    echo '     }'
+    echo
+    echo "     Then restart:  flo-admin restart"
+    echo
+  fi
+
   hr
 }
 

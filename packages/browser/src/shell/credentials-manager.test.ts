@@ -205,6 +205,83 @@ describe('CredentialsManager', () => {
     });
   });
 
+  describe('handleHubSetup', () => {
+    it('configures hub mode when hub has shared providers', async () => {
+      deps.hubClient.connect.mockResolvedValue({
+        id: 'hub1',
+        httpApiUrl: 'https://hub.example.com:8765',
+        sharedProviders: ['anthropic'],
+      });
+
+      const result = await cm.handleHubSetup('wss://hub.example.com:8765');
+
+      expect(result.sharedProviders).toEqual(['anthropic']);
+      expect(ensureServiceWorkerReady).toHaveBeenCalled();
+      expect(configureHubMode).toHaveBeenCalledWith(true, 'https://hub.example.com:8765', undefined);
+      expect(deps.persistence.saveSettings).toHaveBeenCalledWith(
+        expect.objectContaining({
+          apiKeySource: 'hub',
+          hubForApiKey: 'hub1',
+          hasSeenHomepage: true,
+        }),
+      );
+    });
+
+    it('does not throw when hub has no shared providers', async () => {
+      deps.hubClient.connect.mockResolvedValue({
+        id: 'hub1',
+        httpApiUrl: 'https://hub.example.com:8765',
+        sharedProviders: [],
+      });
+
+      const result = await cm.handleHubSetup('wss://hub.example.com:8765');
+
+      expect(result.sharedProviders).toEqual([]);
+      // Should NOT configure hub mode
+      expect(configureHubMode).not.toHaveBeenCalled();
+      // Should NOT disconnect
+      expect(deps.hubClient.disconnect).not.toHaveBeenCalled();
+      // Should save with local apiKeySource
+      expect(deps.persistence.saveSettings).toHaveBeenCalledWith(
+        expect.objectContaining({
+          apiKeySource: 'local',
+          hasSeenHomepage: true,
+        }),
+      );
+    });
+
+    it('saves hub connection when no shared providers', async () => {
+      deps.hubClient.connect.mockResolvedValue({
+        id: 'hub1',
+        httpApiUrl: 'https://hub.example.com:8765',
+        sharedProviders: [],
+      });
+
+      await cm.handleHubSetup('wss://hub.example.com:8765');
+
+      const savedSettings = deps.persistence.saveSettings.mock.calls[0][0];
+      expect(savedSettings.hubConnections).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ url: 'wss://hub.example.com:8765', name: 'Setup Hub' }),
+        ]),
+      );
+    });
+
+    it('handles undefined sharedProviders as empty', async () => {
+      deps.hubClient.connect.mockResolvedValue({
+        id: 'hub1',
+        httpApiUrl: 'https://hub.example.com:8765',
+        sharedProviders: undefined,
+      });
+
+      const result = await cm.handleHubSetup('wss://hub.example.com:8765');
+
+      expect(result.sharedProviders).toEqual([]);
+      expect(configureHubMode).not.toHaveBeenCalled();
+      expect(deps.hubClient.disconnect).not.toHaveBeenCalled();
+    });
+  });
+
   describe('initializeApiAccess', () => {
     it('sends all provider keys to SW in local key mode', async () => {
       deps.persistence.getSettings.mockResolvedValue({ apiKeySource: 'local' });

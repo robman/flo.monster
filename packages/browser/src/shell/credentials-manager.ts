@@ -161,21 +161,19 @@ export class CredentialsManager {
     // Try to connect to hub
     const conn = await this.deps.hubClient.connect(hubUrl, 'Setup Hub', hubToken);
 
-    // Check if hub has shared API keys
-    if (!conn.sharedProviders || conn.sharedProviders.length === 0) {
-      this.deps.hubClient.disconnect(conn.id);
-      throw new Error('Connected, but hub has no shared API keys. You still need your own key.');
-    }
+    const hasSharedKeys = conn.sharedProviders && conn.sharedProviders.length > 0;
 
-    // Register SW first, then configure for hub mode
-    await ensureServiceWorkerReady();
-    await configureHubMode(true, conn.httpApiUrl, hubToken);
-    console.log('[flo] Hub mode configured:', conn.httpApiUrl);
+    if (hasSharedKeys) {
+      // Hub shares API keys — configure SW for hub-routed API calls
+      await ensureServiceWorkerReady();
+      await configureHubMode(true, conn.httpApiUrl, hubToken);
+      console.log('[flo] Hub mode configured:', conn.httpApiUrl);
+    }
 
     // Save settings
     const settings = await this.deps.persistence.getSettings();
-    settings.apiKeySource = 'hub';
-    settings.hubForApiKey = conn.id;
+    settings.apiKeySource = hasSharedKeys ? 'hub' : 'local';
+    if (hasSharedKeys) settings.hubForApiKey = conn.id;
     settings.hubConnections = settings.hubConnections || [];
     if (!settings.hubConnections.find(c => c.url === hubUrl)) {
       const savedConn: SavedHubConnection = { url: hubUrl, name: 'Setup Hub' };
@@ -189,7 +187,7 @@ export class CredentialsManager {
     settings.hasSeenHomepage = true;
     await this.deps.persistence.saveSettings(settings);
 
-    return { sharedProviders: conn.sharedProviders };
+    return { sharedProviders: conn.sharedProviders || [] };
   }
 
   /**
@@ -384,12 +382,20 @@ export class CredentialsManager {
 
       try {
         const result = await this.handleHubSetup(hubUrl, hubToken);
-        statusDiv.textContent = `Connected! Shared providers: ${result.sharedProviders.join(', ')}`;
-        statusDiv.className = 'setup-form__status setup-form__status--success';
 
-        // Hide overlay and initialize app
-        overlay.hidden = true;
-        await onCredentialsReady();
+        if (result.sharedProviders.length === 0) {
+          // Hub connected but no shared keys — guide user to enter their own
+          statusDiv.textContent = 'Hub connected! Enter an API key below to start using agents.';
+          statusDiv.className = 'setup-form__status setup-form__status--success';
+          // Switch to Own Key tab
+          tabOwnKey?.click();
+        } else {
+          // Hub shares API keys — all done
+          statusDiv.textContent = `Connected! Shared providers: ${result.sharedProviders.join(', ')}`;
+          statusDiv.className = 'setup-form__status setup-form__status--success';
+          overlay.hidden = true;
+          await onCredentialsReady();
+        }
       } catch (err) {
         statusDiv.textContent = `Failed to connect: ${(err as Error).message}`;
         statusDiv.className = 'setup-form__status setup-form__status--error';

@@ -1255,6 +1255,24 @@ print_multipass_results() {
   fi
   echo
   hr
+  echo "  API Keys:"
+  hr
+  echo
+  echo "  This hub has no API keys yet. You can either:"
+  echo
+  echo "  a) Enter your API key in the browser (it stays in your browser)"
+  echo "  b) Add shared keys to hub.json so all connected browsers can use them:"
+  echo
+  echo "     multipass exec ${INSTANCE_NAME} -- sudo nano /home/flo-hub/.flo-monster/hub.json"
+  echo
+  echo '     Add a "sharedApiKeys" section:'
+  echo '     "sharedApiKeys": {'
+  echo '       "anthropic": "sk-ant-..."'
+  echo '     }'
+  echo
+  echo "     Then restart:  multipass exec ${INSTANCE_NAME} -- flo-admin restart"
+  echo
+  hr
   echo "  Management:"
   hr
   echo
@@ -1322,6 +1340,24 @@ print_direct_results() {
     echo "  4. Enter the Auth Token shown above"
     echo "  5. Click Connect"
   fi
+  echo
+  hr
+  echo "  API Keys:"
+  hr
+  echo
+  echo "  This hub has no API keys yet. You can either:"
+  echo
+  echo "  a) Enter your API key in the browser (it stays in your browser)"
+  echo "  b) Add shared keys to hub.json so all connected browsers can use them:"
+  echo
+  echo "     sudo nano /home/flo-hub/.flo-monster/hub.json"
+  echo
+  echo '     Add a "sharedApiKeys" section:'
+  echo '     "sharedApiKeys": {'
+  echo '       "anthropic": "sk-ant-..."'
+  echo '     }'
+  echo
+  echo "     Then restart:  flo-admin restart"
   echo
   hr
   echo "  Management:"
