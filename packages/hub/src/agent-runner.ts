@@ -28,7 +28,7 @@ import { HubDomContainer } from './dom-container.js';
 export type RunnerState = 'pending' | 'running' | 'paused' | 'stopped';
 
 export interface RunnerEvent {
-  type: 'state_change' | 'message' | 'error' | 'loop_complete';
+  type: 'state_change' | 'message' | 'error' | 'loop_complete' | 'notify_user';
   timestamp: number;
   data: unknown;
 }
@@ -308,6 +308,27 @@ export class HeadlessAgentRunner {
         timestamp,
       });
     }
+  }
+
+  /**
+   * Queue a message for processing after the current loop completes.
+   * If not busy, uses sendMessage() directly.
+   */
+  queueMessage(content: string): void {
+    if (this._busy) {
+      this._messageQueue.push(content);
+    } else {
+      this.sendMessage(content);
+    }
+  }
+
+  /**
+   * Emit a runner event to all registered event callbacks.
+   * Used by hub-runjs flo.notify_user() to trigger push notifications
+   * via the event forwarding system.
+   */
+  emitRunnerEvent(event: RunnerEvent): void {
+    this.emitEvent(event);
   }
 
   /**

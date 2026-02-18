@@ -6,6 +6,7 @@ function createMockRunner(state = 'running' as string, busy = false) {
     getState: vi.fn(() => state),
     busy,
     sendMessage: vi.fn(),
+    queueMessage: vi.fn(),
   };
 }
 
@@ -291,6 +292,39 @@ describe('Scheduler', () => {
       expect(scheduler.disableSchedule('agent-1', 'sched-999')).toBe(false);
     });
 
+    it('addSchedule with tool and toolInput succeeds', () => {
+      const id = scheduler.addSchedule({
+        hubAgentId: 'agent-1',
+        type: 'cron',
+        cronExpression: '*/5 * * * *',
+        tool: 'runjs',
+        toolInput: { code: 'flo.push({title: "Hi", body: "Test"})' },
+      });
+      expect(id).toBe('sched-1');
+      const entries = scheduler.getSchedules('agent-1');
+      expect(entries[0].tool).toBe('runjs');
+      expect(entries[0].toolInput).toEqual({ code: 'flo.push({title: "Hi", body: "Test"})' });
+      expect(entries[0].message).toBeUndefined();
+    });
+
+    it('addSchedule rejects both message and tool', () => {
+      expect(() => scheduler.addSchedule({
+        hubAgentId: 'agent-1',
+        type: 'cron',
+        cronExpression: '*/5 * * * *',
+        message: 'check stuff',
+        tool: 'runjs',
+      })).toThrow('Cannot specify both message and tool');
+    });
+
+    it('addSchedule rejects neither message nor tool', () => {
+      expect(() => scheduler.addSchedule({
+        hubAgentId: 'agent-1',
+        type: 'cron',
+        cronExpression: '*/5 * * * *',
+      })).toThrow('Must specify either message or tool');
+    });
+
     it('removeAllForAgent clears all entries for agent', () => {
       scheduler.addSchedule({ hubAgentId: 'agent-1', type: 'cron', cronExpression: '* * * * *', message: 'a' });
       scheduler.addSchedule({ hubAgentId: 'agent-1', type: 'cron', cronExpression: '*/5 * * * *', message: 'b' });
@@ -472,6 +506,169 @@ describe('Scheduler', () => {
       expect(entry.runCount).toBe(1);
       expect(entry.lastRunAt).toBeGreaterThan(0);
     });
+
+    it('tool-based entry calls executeToolForAgent', async () => {
+      const executeToolForAgent = vi.fn().mockResolvedValue({ content: 'ok' });
+      const runner = createMockRunner();
+      const scheduler = new Scheduler({ getRunner: vi.fn(() => runner as any), executeToolForAgent });
+
+      scheduler.addSchedule({
+        hubAgentId: 'agent-1',
+        type: 'event',
+        eventName: 'test_event',
+        tool: 'runjs',
+        toolInput: { code: 'flo.push({title: "Test", body: "msg"})' },
+      });
+
+      scheduler.fireEvent('test_event', 'agent-1');
+
+      // Wait for async execution
+      await new Promise(r => setTimeout(r, 10));
+
+      expect(executeToolForAgent).toHaveBeenCalledWith('agent-1', 'runjs', { code: 'flo.push({title: "Test", body: "msg"})' });
+      expect(runner.sendMessage).not.toHaveBeenCalled();
+    });
+
+    it('tool-based entry does not call runner.sendMessage', async () => {
+      const executeToolForAgent = vi.fn().mockResolvedValue({ content: 'ok' });
+      const runner = createMockRunner();
+      const scheduler = new Scheduler({ getRunner: vi.fn(() => runner as any), executeToolForAgent });
+
+      scheduler.addSchedule({
+        hubAgentId: 'agent-1',
+        type: 'event',
+        eventName: 'test_event',
+        tool: 'runjs',
+        toolInput: { code: '1+1' },
+      });
+
+      scheduler.fireEvent('test_event', 'agent-1');
+      await new Promise(r => setTimeout(r, 10));
+
+      expect(runner.sendMessage).not.toHaveBeenCalled();
+    });
+
+    it('tool-based entry notifies agent on executeToolForAgent rejection', async () => {
+      const executeToolForAgent = vi.fn().mockRejectedValue(new Error('Tool crashed'));
+      const runner = createMockRunner();
+      runner.queueMessage = vi.fn();
+      const scheduler = new Scheduler({ getRunner: vi.fn(() => runner as any), executeToolForAgent });
+
+      scheduler.addSchedule({
+        hubAgentId: 'agent-1',
+        type: 'event',
+        eventName: 'test_event',
+        tool: 'bash',
+        toolInput: { command: 'ls /bad/path' },
+      });
+
+      scheduler.fireEvent('test_event', 'agent-1');
+      await new Promise(r => setTimeout(r, 20));
+
+      // runCount should still increment despite failure
+      const entries = scheduler.getSchedules('agent-1');
+      expect(entries[0].runCount).toBe(1);
+      expect(entries[0].lastRunAt).toBeGreaterThan(0);
+      // Agent should be notified of the failure
+      expect(runner.queueMessage).toHaveBeenCalledTimes(1);
+      expect(runner.queueMessage).toHaveBeenCalledWith(
+        expect.stringContaining('Tool crashed')
+      );
+      expect(runner.queueMessage).toHaveBeenCalledWith(
+        expect.stringContaining('Scheduled task')
+      );
+    });
+
+    it('tool-based entry notifies agent on is_error result', async () => {
+      const executeToolForAgent = vi.fn().mockResolvedValue({ content: 'document.getElementById is not available', is_error: true });
+      const runner = createMockRunner();
+      runner.queueMessage = vi.fn();
+      const scheduler = new Scheduler({ getRunner: vi.fn(() => runner as any), executeToolForAgent });
+
+      scheduler.addSchedule({
+        hubAgentId: 'agent-1',
+        type: 'event',
+        eventName: 'test_event',
+        tool: 'runjs',
+        toolInput: { code: 'document.getElementById("x")' },
+      });
+
+      scheduler.fireEvent('test_event', 'agent-1');
+      await new Promise(r => setTimeout(r, 20));
+
+      expect(runner.queueMessage).toHaveBeenCalledTimes(1);
+      expect(runner.queueMessage).toHaveBeenCalledWith(
+        expect.stringContaining('document.getElementById is not available')
+      );
+    });
+
+    it('tool-based entry does not notify agent on success', async () => {
+      const executeToolForAgent = vi.fn().mockResolvedValue({ content: 'ok' });
+      const runner = createMockRunner();
+      runner.queueMessage = vi.fn();
+      const scheduler = new Scheduler({ getRunner: vi.fn(() => runner as any), executeToolForAgent });
+
+      scheduler.addSchedule({
+        hubAgentId: 'agent-1',
+        type: 'event',
+        eventName: 'test_event',
+        tool: 'runjs',
+        toolInput: { code: '1+1' },
+      });
+
+      scheduler.fireEvent('test_event', 'agent-1');
+      await new Promise(r => setTimeout(r, 20));
+
+      expect(runner.queueMessage).not.toHaveBeenCalled();
+    });
+
+    it('tool-based entry respects maxRuns even on execution failure', async () => {
+      const executeToolForAgent = vi.fn().mockRejectedValue(new Error('Always fails'));
+      const runner = createMockRunner();
+      runner.queueMessage = vi.fn();
+      const scheduler = new Scheduler({ getRunner: vi.fn(() => runner as any), executeToolForAgent });
+
+      scheduler.addSchedule({
+        hubAgentId: 'agent-1',
+        type: 'event',
+        eventName: 'test_event',
+        tool: 'runjs',
+        toolInput: { code: '1' },
+        maxRuns: 2,
+      });
+
+      scheduler.fireEvent('test_event', 'agent-1');
+      await new Promise(r => setTimeout(r, 10));
+      scheduler.fireEvent('test_event', 'agent-1');
+      await new Promise(r => setTimeout(r, 10));
+      scheduler.fireEvent('test_event', 'agent-1'); // Should not execute — maxRuns reached
+      await new Promise(r => setTimeout(r, 10));
+
+      expect(executeToolForAgent).toHaveBeenCalledTimes(2);
+      expect(scheduler.getSchedules('agent-1')[0].enabled).toBe(false);
+    });
+
+    it('tool-based entry respects maxRuns', async () => {
+      const executeToolForAgent = vi.fn().mockResolvedValue({ content: 'ok' });
+      const runner = createMockRunner();
+      const scheduler = new Scheduler({ getRunner: vi.fn(() => runner as any), executeToolForAgent });
+
+      scheduler.addSchedule({
+        hubAgentId: 'agent-1',
+        type: 'event',
+        eventName: 'test_event',
+        tool: 'runjs',
+        toolInput: { code: '1+1' },
+        maxRuns: 1,
+      });
+
+      scheduler.fireEvent('test_event', 'agent-1');
+      await new Promise(r => setTimeout(r, 10));
+
+      const entries = scheduler.getSchedules('agent-1');
+      expect(entries[0].enabled).toBe(false);
+      expect(entries[0].runCount).toBe(1);
+    });
   });
 
   describe('cron timer', () => {
@@ -564,6 +761,27 @@ describe('Scheduler', () => {
       // New ID should be > 50
       const num = parseInt(newId.replace('sched-', ''), 10);
       expect(num).toBeGreaterThan(50);
+    });
+
+    it('serialize/restore preserves tool and toolInput', () => {
+      const deps: SchedulerDeps = { getRunner: vi.fn() };
+      const scheduler = new Scheduler(deps);
+
+      scheduler.addSchedule({
+        hubAgentId: 'agent-1',
+        type: 'cron',
+        cronExpression: '0 * * * *',
+        tool: 'runjs',
+        toolInput: { code: 'test' },
+      });
+
+      const serialized = scheduler.serialize();
+      const newScheduler = new Scheduler({ getRunner: () => undefined as any });
+      newScheduler.restore(serialized);
+
+      const entries = newScheduler.getSchedules('agent-1');
+      expect(entries[0].tool).toBe('runjs');
+      expect(entries[0].toolInput).toEqual({ code: 'test' });
     });
   });
 });

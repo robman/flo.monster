@@ -8,9 +8,12 @@ import type { AgentConfig } from '@flo-monster/core';
 describe('runner-tool-executor', () => {
   describe('isBrowserOnlyTool', () => {
     it('returns true for browser-only tools', () => {
-      expect(isBrowserOnlyTool('runjs')).toBe(true);
       expect(isBrowserOnlyTool('view_state')).toBe(true);
       expect(isBrowserOnlyTool('audit_log')).toBe(true);
+    });
+
+    it('runjs is not a browser-only tool (hub handles it with state/storage stores)', () => {
+      expect(isBrowserOnlyTool('runjs')).toBe(false);
     });
 
     it('storage is no longer a browser-only tool (hub handles it)', () => {
@@ -56,19 +59,19 @@ describe('runner-tool-executor', () => {
         hubConfig: getDefaultConfig(),
       });
 
-      const result = await executor('runjs', { code: 'console.log("test")' });
+      const result = await executor('view_state', {});
       expect(result.is_error).toBe(true);
       expect(result.content).toContain('browser-only tool');
     });
 
-    it('returns error for browser-only tool: runjs', async () => {
+    it('returns error for runjs without stores or browser', async () => {
       const executor = createToolExecutor({
         hubConfig: getDefaultConfig(),
       });
 
       const result = await executor('runjs', { code: 'console.log("test")' });
       expect(result.is_error).toBe(true);
-      expect(result.content).toContain('browser-only tool');
+      expect(result.content).toContain('hub state/storage stores or a connected browser');
     });
 
     it('routes browser-only tool through BrowserToolRouter when available', async () => {
@@ -118,7 +121,31 @@ describe('runner-tool-executor', () => {
       );
     });
 
-    it('returns browser-only error when router provided but no hubAgentId', async () => {
+    it('routes runjs to hub when stateStore and storageStore available', async () => {
+      const mockRouter = {
+        routeToBrowser: vi.fn().mockResolvedValue({ content: 'browser result' }),
+        isAvailable: vi.fn().mockReturnValue(true),
+        handleResult: vi.fn(),
+        pendingCount: 0,
+      };
+
+      const executor = createToolExecutor({
+        hubConfig: getDefaultConfig(),
+        browserToolRouter: mockRouter as any,
+        hubAgentId: 'hub-agent-1',
+        stateStore: new HubAgentStateStore(),
+        storageStore: new HubAgentStorageStore(),
+      });
+
+      const result = await executor('runjs', { code: '1 + 1' });
+      // Should NOT route to browser — hub handles it
+      expect(mockRouter.routeToBrowser).not.toHaveBeenCalled();
+      // The result will be an error because the Worker .js file doesn't exist in tests,
+      // but it should NOT be the "browser-only tool" error
+      expect(result.content).not.toContain('browser-only tool');
+    });
+
+    it('returns error for runjs when router provided but no hubAgentId', async () => {
       const mockRouter = {
         routeToBrowser: vi.fn(),
         isAvailable: vi.fn(),
@@ -129,13 +156,37 @@ describe('runner-tool-executor', () => {
       const executor = createToolExecutor({
         hubConfig: getDefaultConfig(),
         browserToolRouter: mockRouter as any,
-        // hubAgentId is missing
+        // hubAgentId is missing — runjs needs hubAgentId for both hub and browser paths
       });
 
       const result = await executor('runjs', { code: 'console.log("test")' });
       expect(result.is_error).toBe(true);
-      expect(result.content).toContain('browser-only tool');
+      expect(result.content).toContain('hub state/storage stores or a connected browser');
       expect(mockRouter.routeToBrowser).not.toHaveBeenCalled();
+    });
+
+    it('runjs falls back to browser when no stores but browser connected', async () => {
+      const mockRouter = {
+        routeToBrowser: vi.fn().mockResolvedValue({ content: 'browser result' }),
+        isAvailable: vi.fn().mockReturnValue(true),
+        handleResult: vi.fn(),
+        pendingCount: 0,
+      };
+
+      const executor = createToolExecutor({
+        hubConfig: getDefaultConfig(),
+        browserToolRouter: mockRouter as any,
+        hubAgentId: 'hub-agent-1',
+        // No stateStore or storageStore — should fall back to browser
+      });
+
+      const result = await executor('runjs', { code: 'console.log("hello")' });
+      expect(result.content).toBe('browser result');
+      expect(mockRouter.routeToBrowser).toHaveBeenCalledWith(
+        'hub-agent-1',
+        'runjs',
+        { code: 'console.log("hello")' },
+      );
     });
 
     it('capabilities tool returns hub capabilities when agentConfig provided', async () => {

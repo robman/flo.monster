@@ -4,6 +4,9 @@
 
 import { WebSocketServer, WebSocket, type RawData } from 'ws';
 import type { IncomingMessage } from 'node:http';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
 import type { HubConfig } from '../config.js';
 import type { HubServer, ConnectedClient } from '../server.js';
 import type {
@@ -453,6 +456,35 @@ export function createAdminServer(
           agentId: message.agentId,
           domState: domState || null,
         });
+        break;
+      }
+
+      case 'get_agent_runjs_log': {
+        const agentStorePath = config.agentStorePath || join(homedir(), '.flo-monster', 'agents');
+        const logPath = join(agentStorePath, message.agentId, 'runjs.log');
+        try {
+          const content = await readFile(logPath, 'utf-8');
+          const lines = content.trim().split('\n').filter(Boolean);
+          const rjsLimit = message.limit || 20;
+          const entries = lines.slice(-rjsLimit).map(line => {
+            try { return JSON.parse(line); } catch { return null; }
+          }).filter(Boolean);
+          sendMessage(client.ws, {
+            type: 'agent_runjs_log',
+            agentId: message.agentId,
+            entries,
+          });
+        } catch (err: any) {
+          if (err.code === 'ENOENT') {
+            sendMessage(client.ws, {
+              type: 'agent_runjs_log',
+              agentId: message.agentId,
+              entries: [],
+            });
+          } else {
+            sendMessage(client.ws, { type: 'error', message: `Failed to read runjs log: ${err.message}` });
+          }
+        }
         break;
       }
 

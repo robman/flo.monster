@@ -15,6 +15,7 @@ import type { BrowserToolRouter } from '../browser-tool-router.js';
 import type { Scheduler } from '../scheduler.js';
 import type { PushManager } from '../push-manager.js';
 import { sendWsMessage } from '../utils/ws-utils.js';
+import { executeSafeFetch } from '../utils/safe-fetch.js';
 import {
   handlePersistAgent,
   handleSubscribeAgent,
@@ -163,34 +164,6 @@ async function handleToolCall(
 // ============================================================================
 
 /**
- * Check if a hostname resolves to a private/internal IP range.
- * Used to prevent SSRF via redirect to internal services.
- */
-function isPrivateIP(hostname: string): boolean {
-  // Strip IPv6 brackets if present (URL.hostname returns [::1] for IPv6)
-  const h = hostname.startsWith('[') && hostname.endsWith(']')
-    ? hostname.slice(1, -1)
-    : hostname;
-  // Check common private IP patterns
-  if (h === 'localhost' || h === '127.0.0.1' || h === '::1') return true;
-  if (h.startsWith('127.')) return true;
-  if (h.startsWith('10.')) return true;
-  if (h.startsWith('192.168.')) return true;
-  if (h.startsWith('0.')) return true;
-  if (h === '0.0.0.0') return true;
-  // 172.16.0.0 - 172.31.255.255
-  if (h.startsWith('172.')) {
-    const second = parseInt(h.split('.')[1], 10);
-    if (second >= 16 && second <= 31) return true;
-  }
-  // Link-local
-  if (h.startsWith('169.254.')) return true;
-  // IPv6
-  if (h.startsWith('fe80:') || h.startsWith('fc') || h.startsWith('fd')) return true;
-  return false;
-}
-
-/**
  * Handle a fetch request (proxy)
  */
 async function handleFetchRequest(
@@ -212,147 +185,23 @@ async function handleFetchRequest(
       return;
     }
 
-    // Check URL against allowed/blocked patterns
-    const url = message.url;
-    const isBlocked = config.fetchProxy.blockedPatterns.some(pattern => {
-      const regex = new RegExp('^' + pattern.replace(/\*/g, '.*') + '$');
-      return regex.test(url) || regex.test(new URL(url).hostname);
+    // Delegate to executeSafeFetch — handles private IP checks, blocked patterns,
+    // sensitive header stripping, manual redirect following with per-hop validation
+    const result = await executeSafeFetch(message.url, {
+      method: message.options?.method,
+      headers: message.options?.headers as Record<string, string> | undefined,
+      body: message.options?.body,
+      blockedPatterns: config.fetchProxy.blockedPatterns,
     });
 
-    if (isBlocked) {
-      const response: FetchResultMessage = {
-        type: 'fetch_result',
-        id: message.id,
-        status: 0,
-        body: '',
-        error: 'URL is blocked by fetch proxy policy',
-      };
-      sendWsMessage(client.ws, response);
-      return;
-    }
-
-    // Perform the fetch
-    const fetchOptions: RequestInit = {
-      method: message.options?.method || 'GET',
-      headers: message.options?.headers,
-      body: message.options?.body,
+    const response: FetchResultMessage = {
+      type: 'fetch_result',
+      id: message.id,
+      status: result.status,
+      body: result.body,
+      error: result.error,
     };
-
-    // Strip sensitive headers from agent fetch requests (H-H1)
-    const sensitiveHeaders = ['authorization', 'cookie', 'x-api-key', 'proxy-authorization', 'set-cookie'];
-    if (fetchOptions.headers) {
-      const headers = new Headers(fetchOptions.headers as HeadersInit);
-      for (const header of sensitiveHeaders) {
-        headers.delete(header);
-      }
-      fetchOptions.headers = Object.fromEntries(headers.entries());
-    }
-
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 30000);
-
-    try {
-      // Follow redirects manually to validate each hop (H-H2)
-      let currentUrl = url;
-      let fetchResponse: Response | undefined;
-      const maxRedirects = 5;
-
-      for (let i = 0; i <= maxRedirects; i++) {
-        fetchResponse = await fetch(currentUrl, {
-          ...fetchOptions,
-          signal: controller.signal,
-          redirect: 'manual',
-        });
-
-        // Check if this is a redirect
-        const status = fetchResponse.status;
-        if (status >= 300 && status < 400) {
-          const location = fetchResponse.headers.get('location');
-          if (!location) break;
-
-          // Resolve relative redirects
-          const redirectUrl = new URL(location, currentUrl).href;
-
-          // Validate redirect target against blocked patterns
-          const isRedirectBlocked = config.fetchProxy.blockedPatterns.some(pattern => {
-            const regex = new RegExp('^' + pattern.replace(/\*/g, '.*') + '$');
-            return regex.test(redirectUrl) || regex.test(new URL(redirectUrl).hostname);
-          });
-
-          if (isRedirectBlocked) {
-            clearTimeout(timeout);
-            const response: FetchResultMessage = {
-              type: 'fetch_result',
-              id: message.id,
-              status: 0,
-              body: '',
-              error: 'Redirect target blocked by fetch proxy policy',
-            };
-            sendWsMessage(client.ws, response);
-            return;
-          }
-
-          // Check redirect for private/internal IPs
-          try {
-            const redirectHostname = new URL(redirectUrl).hostname;
-            if (isPrivateIP(redirectHostname)) {
-              clearTimeout(timeout);
-              const response: FetchResultMessage = {
-                type: 'fetch_result',
-                id: message.id,
-                status: 0,
-                body: '',
-                error: 'Redirect to private IP blocked',
-              };
-              sendWsMessage(client.ws, response);
-              return;
-            }
-          } catch {
-            // Invalid URL — block
-            clearTimeout(timeout);
-            const response: FetchResultMessage = {
-              type: 'fetch_result',
-              id: message.id,
-              status: 0,
-              body: '',
-              error: 'Invalid redirect URL',
-            };
-            sendWsMessage(client.ws, response);
-            return;
-          }
-
-          currentUrl = redirectUrl;
-          // Don't send body on redirects (POST->GET)
-          fetchOptions.body = undefined;
-          continue;
-        }
-
-        // Not a redirect — we have the final response
-        break;
-      }
-
-      clearTimeout(timeout);
-
-      const body = await fetchResponse!.text();
-
-      const response: FetchResultMessage = {
-        type: 'fetch_result',
-        id: message.id,
-        status: fetchResponse!.status,
-        body,
-      };
-      sendWsMessage(client.ws, response);
-    } catch (fetchError) {
-      clearTimeout(timeout);
-      const response: FetchResultMessage = {
-        type: 'fetch_result',
-        id: message.id,
-        status: 0,
-        body: '',
-        error: `Fetch failed: ${(fetchError as Error).message}`,
-      };
-      sendWsMessage(client.ws, response);
-    }
+    sendWsMessage(client.ws, response);
   } catch (error) {
     const response: FetchResultMessage = {
       type: 'fetch_result',

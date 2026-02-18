@@ -22,6 +22,7 @@ export interface HubCapabilitiesResult {
   browserConnected: boolean;
   provider: string;
   model: string;
+  timezone: string;  // Hub server timezone (IANA format, e.g. "Australia/Sydney")
   tools: {
     hub: string[];
     browserRouted: string[];
@@ -53,9 +54,15 @@ export function getHubCapabilities(
     ? BROWSER_ROUTED_TOOLS.filter(t =>
         !(t === 'state' && options?.hasStateStore) &&
         !(t === 'files' && options?.hasFilesRoot) &&
-        !(t === 'dom' && options?.hasDomContainer)
+        !(t === 'dom' && options?.hasDomContainer) &&
+        !(t === 'runjs' && options?.hasStateStore)
       )
     : [];
+
+  // Build hub tools list — add runjs when hub can execute it natively
+  const hubTools = [...HUB_NATIVE_TOOLS];
+  if (options?.hasScheduler) hubTools.push('schedule');
+  if (options?.hasStateStore) hubTools.push('runjs');
 
   return {
     runtime: 'hub',
@@ -63,8 +70,9 @@ export function getHubCapabilities(
     browserConnected,
     provider: config.provider || 'anthropic',
     model: config.model,
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     tools: {
-      hub: options?.hasScheduler ? [...HUB_NATIVE_TOOLS, 'schedule'] : HUB_NATIVE_TOOLS,
+      hub: hubTools,
       browserRouted,
       ...(options?.hasStateStore ? { hubState: true } : {}),
       ...(options?.hasFilesRoot ? { hubFiles: true } : {}),

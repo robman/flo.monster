@@ -110,6 +110,24 @@ export function createHubServer(config: HubConfig): HubServer {
   // Create scheduler for autonomous execution
   const scheduler = new Scheduler({
     getRunner: (hubAgentId: string) => agents.get(hubAgentId),
+    executeToolForAgent: async (hubAgentId: string, toolName: string, toolInput: Record<string, unknown>) => {
+      const runner = agents.get(hubAgentId);
+      if (!runner) throw new Error(`Agent not found: ${hubAgentId}`);
+      const session = runner.serialize();
+      const runnerDeps = createRunnerDeps(session, hubAgentId, {
+        hubConfig: config,
+        hookExecutor,
+        skillManager,
+        agentStore,
+        agentStorePath,
+        clients,
+        browserToolRouter,
+        scheduler,
+        pushManager,
+      }, runner);
+      const toolExecutor = runnerDeps.executeToolCall;
+      return toolExecutor(toolName, toolInput);
+    },
   });
 
   // Create push manager if configured
@@ -202,6 +220,7 @@ export function createHubServer(config: HubConfig): HubServer {
             clients,
             browserToolRouter,
             scheduler,
+            pushManager,
           }, runner, perAgentApiKey, sessionHooks as HookRulesConfig | undefined);
           runner.setDeps(runnerDeps);
 

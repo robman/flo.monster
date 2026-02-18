@@ -17,6 +17,7 @@ export { hubStateToolDef, HubAgentStateStore, executeHubState, type HubStateData
 export { hubFilesToolDef, executeHubFiles, validateFilePath, unpackFilesToDisk, type HubFilesInput } from './hub-files.js';
 export { scheduleToolDef, executeScheduleTool, type ScheduleToolInput } from './schedule.js';
 export { contextSearchToolDef, executeHubContextSearch } from './context-search.js';
+export { hubRunJsToolDef, executeHubRunJs, type HubRunJsDeps, type RunJsLogEntry } from './hub-runjs.js';
 
 export interface ToolDef {
   name: string;

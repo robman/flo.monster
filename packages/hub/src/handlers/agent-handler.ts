@@ -14,6 +14,7 @@ import { unpackFilesToDisk } from '../tools/hub-files.js';
 import { getToolDefinitions } from '../tools/index.js';
 import { scheduleToolDef } from '../tools/schedule.js';
 import { contextSearchToolDef } from '../tools/context-search.js';
+import { hubRunJsToolDef } from '../tools/hub-runjs.js';
 import type { HubSkillManager } from '../skill-manager.js';
 import type { BrowserToolRouter } from '../browser-tool-router.js';
 import type { Scheduler } from '../scheduler.js';
@@ -82,6 +83,11 @@ export function createRunnerDeps(
     ? join(deps.hubConfig.sandboxPath, hubAgentId)
     : undefined;
 
+  // Compute per-agent data directory for runjs logging
+  const agentDataDir = deps.agentStorePath
+    ? join(deps.agentStorePath, hubAgentId)
+    : undefined;
+
   const declarativeHookEvaluator = hooks ? new DeclarativeHookEvaluator(hooks) : undefined;
 
   const executeToolCall = createToolExecutor({
@@ -99,6 +105,9 @@ export function createRunnerDeps(
     agentSandbox,
     getMessages: runner ? () => runner.getMessageHistory() : undefined,
     declarativeHookEvaluator,
+    pushManager: deps.pushManager,
+    runner,
+    agentDataDir,
   });
 
   // Compute hub tool definitions to inject for the LLM
@@ -107,6 +116,7 @@ export function createRunnerDeps(
     ...getToolDefinitions(deps.hubConfig, true),  // bash, filesystem, skill tools
     ...(deps.scheduler ? [scheduleToolDef] : []),
     contextSearchToolDef,
+    hubRunJsToolDef,
   ];
 
   return {
@@ -141,12 +151,12 @@ export function setupEventForwarding(
       }
     }
 
-    // Send push notification when agent loop completes (agent is idle)
-    if (event.type === 'loop_complete' && pushManager) {
+    // Send push notification when agent emits notify_user
+    if (event.type === 'notify_user' && pushManager) {
       pushManager.sendPush({
         title: 'flo.monster',
-        body: `Agent ${runner.config.name} has a response`,
-        tag: `agent-${hubAgentId}`,
+        body: String((event.data as any)?.message || 'Notification'),
+        tag: `notify-${hubAgentId}`,
         agentId: hubAgentId,
       }).catch(err => {
         console.error(`[push] Failed to send notification for agent ${hubAgentId}:`, err);

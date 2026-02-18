@@ -681,7 +681,7 @@ Hub persistence gives you two modes. Check \`capabilities\` → \`executionMode\
 ### hub-with-browser — A browser is connected
 **Your page is a fully interactive living page.** Use the architect pattern exactly as in browser mode: page JS handles UI updates in event handlers, \`flo.notify()\` sends events to you, inline \`<script>\` tags execute, \`runjs\`, \`dom listen\`, \`view_state\` all work. Build interactive pages with JS — don't hold back because you're on a hub.
 
-Additionally, you have hub-native tools: \`bash\`, \`filesystem\`, \`schedule\`.
+Additionally, you have hub-native tools: \`bash\`, \`filesystem\`, \`schedule\`, \`runjs\` (hub-side).
 
 ### hub-only — No browser connected
 You are running autonomously. Structural DOM only — \`dom create/modify/query/remove\` work via JSDOM but with limitations:
@@ -689,27 +689,85 @@ You are running autonomously. Structural DOM only — \`dom create/modify/query/
 - No rendering — dimensions report as 0x0
 - No events — \`dom listen/wait_for\` unavailable
 
-Use \`state\`, \`files\`, \`bash\`, \`filesystem\`, and \`schedule\` for autonomous work.
+Use \`state\`, \`files\`, \`bash\`, \`filesystem\`, \`schedule\`, and \`runjs\` for autonomous work.
 
 ## Hub-Native Tools (always available)
 - \`bash\` — shell commands in your working directory
 - \`filesystem\` — read/write server files
+- \`runjs\` — execute JavaScript on the hub with \`flo.*\` API (see below)
 - \`state\` — reactive state store (persists across restarts)
 - \`files\` — agent workspace files (disk-backed, not browser OPFS)
-- \`schedule\` — cron jobs and event triggers
+- \`schedule\` — cron jobs and event triggers (supports direct tool execution)
 - \`capabilities\`, \`context_search\`, \`list_skills\`, \`get_skill\`
+
+## Hub-Side runjs — \`flo.*\` API
+
+On the hub, \`runjs\` executes in a sandboxed VM (no Node.js builtins) with a \`flo.*\` bridge API:
+
+### State & Storage
+- \`flo.state.get(key)\` / \`flo.state.set(key, value)\` / \`flo.state.getAll()\` — persistent reactive state
+- \`flo.storage.get(key)\` / \`flo.storage.set(key, value)\` / \`flo.storage.delete(key)\` / \`flo.storage.list()\` — key-value storage
+
+### Communication & Notifications
+- \`flo.notify(message)\` — send a message to yourself (queued if busy, delivered after current loop)
+- \`flo.notify_user(message)\` — send push notification to user's devices (use this for important alerts)
+- \`flo.push({ title, body })\` — send push notification with custom title/body
+
+### Tools & Events
+- \`flo.callTool(name, input)\` — call any available tool from JS (cannot call \`runjs\` recursively)
+- \`flo.emit(eventName, data)\` — fire an event that triggers matching event-based schedules
+- \`flo.fetch(url, options)\` — HTTP fetch with SSRF protection (private IPs blocked)
+
+### Other
+- \`flo.sleep(ms)\` — sleep/delay for the specified milliseconds (timer-based, shares worker event loop)
+- \`flo.agent.id\` — your hub agent ID
+- \`flo.log(...args)\` — log to console output (captured and returned)
+- \`flo.ask()\` — not available on hub (would deadlock the agentic loop)
+
+### Examples
+\`\`\`
+// Send a push notification
+runjs({ code: 'flo.push({ title: "Weather Alert", body: "Rain expected at 3pm" })' })
+
+// Read and transform state
+runjs({ code: 'const score = await flo.state.get("score"); await flo.state.set("score", score + 1); return score + 1' })
+
+// Call another tool from JS
+runjs({ code: 'const result = await flo.callTool("bash", { command: "uptime" }); return result' })
+
+// Fetch external data
+runjs({ code: 'const resp = await flo.fetch("https://api.example.com/data"); return resp.text' })
+\`\`\`
+
+Standard timer APIs (\`setTimeout\`, \`clearTimeout\`, \`setInterval\`, \`clearInterval\`) are available. Default timeout is 5 minutes.
+
+IMPORTANT: Hub runjs has NO DOM or browser APIs (document, window, etc). To update the page, use \`flo.callTool("dom", { action: "modify", selector: "#myEl", html: "new content" })\`. Hub runjs always runs in worker context — \`context: 'iframe'\` is silently ignored on the hub.
 
 ## Schedule Tool — Autonomous Execution
 
-The \`schedule\` tool lets you set up triggers that wake you when no one is around:
+The \`schedule\` tool lets you set up triggers that run when no one is around. Two trigger modes:
 
-### Cron Jobs (periodic)
+### Message Triggers (wake the agent)
+Sends a message that starts an LLM loop — use when the agent needs to think and respond:
 \`\`\`
 schedule({ action: 'add', type: 'cron', cron: '*/5 * * * *', message: 'Check for updates' })
 schedule({ action: 'add', type: 'cron', cron: '0 9 * * 1-5', message: 'Daily standup summary', maxRuns: 5 })
 \`\`\`
 
-Cron format: \`minute hour day month weekday\`
+### Stored Tool Calls (no agent wakeup)
+Executes a tool directly without starting an LLM loop — lightweight, no token cost:
+\`\`\`
+// Send a push notification every hour — no LLM call needed
+schedule({ action: 'add', type: 'cron', cron: '0 * * * *', tool: 'runjs', toolInput: { code: 'flo.push({ title: "Reminder", body: "Check your tasks" })' } })
+
+// Run a bash command on a schedule
+schedule({ action: 'add', type: 'cron', cron: '0 0 * * *', tool: 'bash', toolInput: { command: 'df -h > /tmp/disk-report.txt' } })
+\`\`\`
+
+Specify exactly one of \`message\` or \`tool\` — not both.
+
+### Cron Format
+\`minute hour day month weekday\`
 - \`*\` = every, \`*/N\` = every N, \`N\` = specific, \`N-M\` = range, \`N,M\` = list
 - Examples: \`*/5 * * * *\` (every 5 min), \`0 */2 * * *\` (every 2 hours), \`30 9 * * 1-5\` (9:30 AM weekdays)
 - Minimum interval: 1 minute. Maximum 10 schedules per agent.
@@ -718,7 +776,7 @@ Cron format: \`minute hour day month weekday\`
 \`\`\`
 schedule({ action: 'add', type: 'event', event: 'state:score', condition: '> 100', message: 'Score exceeded 100!' })
 schedule({ action: 'add', type: 'event', event: 'browser:connected', message: 'A browser just connected' })
-schedule({ action: 'add', type: 'event', event: 'browser:disconnected', message: 'Browser disconnected' })
+schedule({ action: 'add', type: 'event', event: 'browser:disconnected', tool: 'runjs', toolInput: { code: 'flo.push({ title: "Alert", body: "Browser disconnected" })' } })
 \`\`\`
 
 Events: \`state:<key>\` (state changes), \`browser:connected\`, \`browser:disconnected\`
@@ -732,7 +790,20 @@ schedule({ action: 'enable', id: 'sched-1' })   // resume
 schedule({ action: 'remove', id: 'sched-1' })   // delete
 \`\`\`
 
-When triggered, you receive the \`message\` as if a user sent it. You can then update your DOM, files, state, or take any action.
+## Push Notifications
+
+To send push notifications to the user's devices, use \`flo.notify_user()\` or \`flo.push()\` in hub-side \`runjs\`:
+\`\`\`
+runjs({ code: 'flo.notify_user("Task complete!")' })
+runjs({ code: 'flo.push({ title: "My Agent", body: "Something happened" })' })
+\`\`\`
+
+For scheduled push notifications without waking the agent, use stored tool calls:
+\`\`\`
+schedule({ action: 'add', type: 'cron', cron: '0 9 * * *', tool: 'runjs', toolInput: { code: 'flo.push({ title: "Good morning", body: "Here\\'s your daily briefing" })' } })
+\`\`\`
+
+Push is delivered when no browser tab is actively viewing the agent. If the user is already on the page, push is suppressed.
 
 ## Hub-Side Storage
 
@@ -743,9 +814,12 @@ When triggered, you receive the \`message\` as if a user sent it. You can then u
 ## Best Practices
 
 - When a browser is connected, build fully interactive pages with JS — same as browser mode
-- When no browser, use structural DOM + state + schedule for autonomous work
+- When no browser, use structural DOM + state + schedule + runjs for autonomous work
 - Use \`browser:connected\` event trigger to set up interactive features when a user arrives
 - Use \`browser:disconnected\` to save state and prepare for autonomous mode
+- Use stored tool calls (\`tool\`/\`toolInput\`) in schedules for lightweight recurring tasks (no token cost)
+- Use \`message\` in schedules when the agent needs to think and decide what to do
+- Use \`flo.notify_user()\` or \`flo.push()\` for important alerts — not every loop completion
 - Schedule maintenance tasks (file cleanup, status updates) via cron
 - Files persist on disk — use them for durable memory (\`memory.md\`, \`plan.md\`, etc.)`,
   source: { type: 'builtin' },

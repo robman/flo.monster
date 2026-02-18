@@ -18,14 +18,16 @@ import { executeHubDom } from './tools/hub-dom.js';
 import type { HubDomContainer } from './dom-container.js';
 import { executeScheduleTool, type ScheduleToolInput } from './tools/schedule.js';
 import { executeHubContextSearch } from './tools/context-search.js';
+import { executeHubRunJs, type HubRunJsDeps } from './tools/hub-runjs.js';
 import type { Scheduler } from './scheduler.js';
+import type { PushManager } from './push-manager.js';
+import type { HeadlessAgentRunner } from './agent-runner.js';
 import type { ContentBlock } from '@flo-monster/core';
 
 export type { ToolResult } from './tools/index.js';
 
 /** Tools that only work in the browser (sandboxed iframe) */
 const BROWSER_ONLY_TOOLS = new Set([
-  'runjs',
   'view_state',
   'audit_log',
   'agent_respond',
@@ -58,6 +60,9 @@ export interface RunnerToolExecutorDeps {
   agentSandbox?: string;
   getMessages?: () => Array<{ role: string; content: ContentBlock[]; turnId?: string }>;
   declarativeHookEvaluator?: DeclarativeHookEvaluator;
+  pushManager?: PushManager;
+  runner?: HeadlessAgentRunner;
+  agentDataDir?: string;
 }
 
 /**
@@ -165,6 +170,34 @@ async function executeRunnerToolCall(
     }
     return {
       content: 'Tool "storage" requires either a hub storage store or a connected browser.',
+      is_error: true,
+    };
+  }
+
+  // Hub-side runjs: execute locally if state/storage stores available, else route to browser
+  if (name === 'runjs') {
+    if (deps.stateStore && deps.storageStore && deps.hubAgentId) {
+      // Create a reference to the executor for flo.callTool() support
+      const executor = createToolExecutor(deps);
+      const runJsDeps: HubRunJsDeps = {
+        agentId: deps.hubAgentId,
+        stateStore: deps.stateStore,
+        storageStore: deps.storageStore,
+        pushManager: deps.pushManager,
+        scheduler: deps.scheduler,
+        hubConfig: deps.hubConfig,
+        runner: deps.runner,
+        executeToolCall: executor,
+        agentDataDir: deps.agentDataDir,
+      };
+      return executeHubRunJs(input as { code: string; context?: string }, runJsDeps);
+    }
+    // Fall through to browser routing if no hub deps
+    if (deps.browserToolRouter && deps.hubAgentId) {
+      return deps.browserToolRouter.routeToBrowser(deps.hubAgentId, name, input);
+    }
+    return {
+      content: 'Tool "runjs" requires either hub state/storage stores or a connected browser.',
       is_error: true,
     };
   }

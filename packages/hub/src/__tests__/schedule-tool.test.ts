@@ -48,7 +48,7 @@ describe('schedule tool', () => {
       expect(result.content).toContain('type');
     });
 
-    it('returns error when message is missing', () => {
+    it('returns error when neither message nor tool is provided', () => {
       const scheduler = createScheduler();
       const result = executeScheduleTool(
         { action: 'add', type: 'cron', cron: '* * * * *' } as ScheduleToolInput,
@@ -56,7 +56,49 @@ describe('schedule tool', () => {
         scheduler,
       );
       expect(result.is_error).toBe(true);
-      expect(result.content).toContain('message');
+      expect(result.content).toContain('message or tool');
+    });
+
+    it('add action with tool and toolInput succeeds', () => {
+      const scheduler = createScheduler();
+      const result = executeScheduleTool({
+        action: 'add',
+        type: 'cron',
+        cron: '*/5 * * * *',
+        tool: 'runjs',
+        toolInput: { code: 'flo.push({title: "Test", body: "msg"})' },
+      }, 'agent-1', scheduler);
+
+      expect(result.is_error).toBeFalsy();
+      const parsed = JSON.parse(result.content);
+      expect(parsed.success).toBe(true);
+      expect(parsed.tool).toBe('runjs');
+    });
+
+    it('add action with both message and tool returns error', () => {
+      const scheduler = createScheduler();
+      const result = executeScheduleTool({
+        action: 'add',
+        type: 'cron',
+        cron: '*/5 * * * *',
+        message: 'check stuff',
+        tool: 'runjs',
+      }, 'agent-1', scheduler);
+
+      expect(result.is_error).toBe(true);
+      expect(result.content).toContain('Cannot specify both message and tool');
+    });
+
+    it('add action with neither message nor tool returns error', () => {
+      const scheduler = createScheduler();
+      const result = executeScheduleTool({
+        action: 'add',
+        type: 'cron',
+        cron: '*/5 * * * *',
+      } as ScheduleToolInput, 'agent-1', scheduler);
+
+      expect(result.is_error).toBe(true);
+      expect(result.content).toContain('message or tool');
     });
 
     it('returns error for invalid cron expression', () => {
@@ -147,6 +189,23 @@ describe('schedule tool', () => {
       const parsed = JSON.parse(result.content);
       expect(parsed.count).toBe(2);
       expect(parsed.schedules).toHaveLength(2);
+    });
+
+    it('list action shows tool and toolInput', () => {
+      const scheduler = createScheduler();
+      // First add a tool-based schedule
+      executeScheduleTool({
+        action: 'add',
+        type: 'cron',
+        cron: '*/5 * * * *',
+        tool: 'runjs',
+        toolInput: { code: 'test' },
+      }, 'agent-1', scheduler);
+
+      const result = executeScheduleTool({ action: 'list' }, 'agent-1', scheduler);
+      const parsed = JSON.parse(result.content);
+      expect(parsed.schedules[0].tool).toBe('runjs');
+      expect(parsed.schedules[0].toolInput).toEqual({ code: 'test' });
     });
 
     it('returns empty list for agent with no schedules', () => {

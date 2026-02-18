@@ -123,4 +123,47 @@ describe('getHubCapabilities', () => {
     const result = getHubCapabilities(config, 'hub-agent-1');
     expect(result.skills).toEqual([]);
   });
+
+  it('includes hub timezone in IANA format', () => {
+    const config = createMockConfig();
+    const result = getHubCapabilities(config, 'hub-agent-1');
+    expect(result.timezone).toBe(Intl.DateTimeFormat().resolvedOptions().timeZone);
+    expect(typeof result.timezone).toBe('string');
+    expect(result.timezone.length).toBeGreaterThan(0);
+  });
+
+  it('moves runjs from browserRouted to hub tools when hasStateStore', () => {
+    const config = createMockConfig();
+    const router = createMockRouter(true);
+    const result = getHubCapabilities(config, 'hub-agent-1', router as any, { hasStateStore: true });
+    expect(result.tools.browserRouted).not.toContain('runjs');
+    expect(result.tools.hub).toContain('runjs');
+  });
+
+  it('includes runjs in hub tools without browser when hasStateStore', () => {
+    const config = createMockConfig();
+    const result = getHubCapabilities(config, 'hub-agent-1', undefined, { hasStateStore: true });
+    expect(result.tools.hub).toContain('runjs');
+    expect(result.tools.browserRouted).toEqual([]);
+  });
+
+  it('keeps runjs in browserRouted when no hasStateStore', () => {
+    const config = createMockConfig();
+    const router = createMockRouter(true);
+    const result = getHubCapabilities(config, 'hub-agent-1', router as any);
+    expect(result.tools.browserRouted).toContain('runjs');
+    expect(result.tools.hub).not.toContain('runjs');
+  });
+
+  it('includes schedule in hub tools when hasScheduler', () => {
+    const config = createMockConfig();
+    const result = getHubCapabilities(config, 'hub-agent-1', undefined, { hasScheduler: true });
+    expect(result.tools.hub).toContain('schedule');
+  });
+
+  it('does not include schedule in hub tools without hasScheduler', () => {
+    const config = createMockConfig();
+    const result = getHubCapabilities(config, 'hub-agent-1');
+    expect(result.tools.hub).not.toContain('schedule');
+  });
 });

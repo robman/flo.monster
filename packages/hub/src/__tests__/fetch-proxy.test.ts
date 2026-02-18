@@ -3,6 +3,7 @@ import { WebSocket } from 'ws';
 import type { ConnectedClient } from '../server.js';
 import { handleMessage } from '../handlers/message-handler.js';
 import { getDefaultConfig, type HubConfig } from '../config.js';
+import { isPrivateIP } from '../utils/safe-fetch.js';
 
 function createMockClient(authenticated = true): ConnectedClient {
   return {
@@ -575,6 +576,74 @@ describe('fetch proxy security', () => {
     expect(error.message).toContain('Not authenticated');
   });
 
+  it('blocks redirects to IPv4-mapped IPv6 loopback (::ffff:127.0.0.1)', async () => {
+    const client = createMockClient();
+    const clients = new Set([client]);
+
+    const originalFetch = global.fetch;
+    global.fetch = vi.fn().mockResolvedValue(
+      new Response('', {
+        status: 302,
+        headers: { Location: 'http://[::ffff:127.0.0.1]:8080/admin' },
+      })
+    );
+
+    try {
+      await handleMessage(
+        client,
+        {
+          type: 'fetch_request',
+          id: 'fetch-v4mapped-loopback',
+          url: 'https://evil.com/redirect',
+        } as any,
+        config,
+        new Map(),
+        clients,
+      );
+
+      const messages = parseSentMessages(client);
+      const result = messages.find((m: any) => m.type === 'fetch_result');
+      expect(result).toBeDefined();
+      expect(result.error).toContain('private IP');
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  it('blocks redirects to IPv4-mapped IPv6 private (::ffff:192.168.1.1)', async () => {
+    const client = createMockClient();
+    const clients = new Set([client]);
+
+    const originalFetch = global.fetch;
+    global.fetch = vi.fn().mockResolvedValue(
+      new Response('', {
+        status: 302,
+        headers: { Location: 'http://[::ffff:192.168.1.1]/router' },
+      })
+    );
+
+    try {
+      await handleMessage(
+        client,
+        {
+          type: 'fetch_request',
+          id: 'fetch-v4mapped-private',
+          url: 'https://evil.com/redirect',
+        } as any,
+        config,
+        new Map(),
+        clients,
+      );
+
+      const messages = parseSentMessages(client);
+      const result = messages.find((m: any) => m.type === 'fetch_result');
+      expect(result).toBeDefined();
+      expect(result.error).toContain('private IP');
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
   it('rejects requests when fetch proxy is disabled', async () => {
     const client = createMockClient();
     const clients = new Set([client]);
@@ -606,5 +675,103 @@ describe('fetch proxy security', () => {
     } finally {
       global.fetch = originalFetch;
     }
+  });
+});
+
+describe('isPrivateIP', () => {
+  it('detects localhost', () => {
+    expect(isPrivateIP('localhost')).toBe(true);
+  });
+
+  it('detects 127.0.0.1 loopback', () => {
+    expect(isPrivateIP('127.0.0.1')).toBe(true);
+    expect(isPrivateIP('127.0.0.2')).toBe(true);
+    expect(isPrivateIP('127.255.255.255')).toBe(true);
+  });
+
+  it('detects 10.x.x.x private range', () => {
+    expect(isPrivateIP('10.0.0.1')).toBe(true);
+    expect(isPrivateIP('10.255.255.255')).toBe(true);
+  });
+
+  it('detects 192.168.x.x private range', () => {
+    expect(isPrivateIP('192.168.0.1')).toBe(true);
+    expect(isPrivateIP('192.168.255.255')).toBe(true);
+  });
+
+  it('detects 172.16-31.x.x private range', () => {
+    expect(isPrivateIP('172.16.0.1')).toBe(true);
+    expect(isPrivateIP('172.31.255.255')).toBe(true);
+    expect(isPrivateIP('172.15.0.1')).toBe(false);
+    expect(isPrivateIP('172.32.0.1')).toBe(false);
+  });
+
+  it('detects 0.0.0.0 and 0.x addresses', () => {
+    expect(isPrivateIP('0.0.0.0')).toBe(true);
+    expect(isPrivateIP('0.1.2.3')).toBe(true);
+  });
+
+  it('detects 169.254.x.x link-local', () => {
+    expect(isPrivateIP('169.254.0.1')).toBe(true);
+    expect(isPrivateIP('169.254.255.255')).toBe(true);
+  });
+
+  it('detects IPv6 loopback ::1', () => {
+    expect(isPrivateIP('::1')).toBe(true);
+    expect(isPrivateIP('[::1]')).toBe(true);
+  });
+
+  it('detects IPv6 link-local fe80:', () => {
+    expect(isPrivateIP('fe80::1')).toBe(true);
+  });
+
+  it('detects IPv6 ULA fc/fd', () => {
+    expect(isPrivateIP('fc00::1')).toBe(true);
+    expect(isPrivateIP('fd12:3456::1')).toBe(true);
+  });
+
+  it('detects IPv4-mapped IPv6 loopback — dotted-decimal form', () => {
+    expect(isPrivateIP('::ffff:127.0.0.1')).toBe(true);
+  });
+
+  it('detects IPv4-mapped IPv6 loopback — hex form (Node.js URL normalization)', () => {
+    // Node.js normalizes ::ffff:127.0.0.1 → ::ffff:7f00:1
+    expect(isPrivateIP('::ffff:7f00:1')).toBe(true);
+  });
+
+  it('detects IPv4-mapped IPv6 private ranges — dotted-decimal form', () => {
+    expect(isPrivateIP('::ffff:10.0.0.1')).toBe(true);
+    expect(isPrivateIP('::ffff:192.168.1.1')).toBe(true);
+    expect(isPrivateIP('::ffff:172.16.0.1')).toBe(true);
+    expect(isPrivateIP('::ffff:169.254.0.1')).toBe(true);
+  });
+
+  it('detects IPv4-mapped IPv6 private ranges — hex form (Node.js URL normalization)', () => {
+    // ::ffff:10.0.0.1 → ::ffff:a00:1
+    expect(isPrivateIP('::ffff:a00:1')).toBe(true);
+    // ::ffff:192.168.1.1 → ::ffff:c0a8:101
+    expect(isPrivateIP('::ffff:c0a8:101')).toBe(true);
+    // ::ffff:172.16.0.1 → ::ffff:ac10:1
+    expect(isPrivateIP('::ffff:ac10:1')).toBe(true);
+    // ::ffff:169.254.0.1 → ::ffff:a9fe:1
+    expect(isPrivateIP('::ffff:a9fe:1')).toBe(true);
+  });
+
+  it('allows IPv4-mapped IPv6 public IPs — dotted-decimal form', () => {
+    expect(isPrivateIP('::ffff:8.8.8.8')).toBe(false);
+    expect(isPrivateIP('::ffff:1.1.1.1')).toBe(false);
+  });
+
+  it('allows IPv4-mapped IPv6 public IPs — hex form', () => {
+    // ::ffff:8.8.8.8 → ::ffff:808:808
+    expect(isPrivateIP('::ffff:808:808')).toBe(false);
+    // ::ffff:1.1.1.1 → ::ffff:101:101
+    expect(isPrivateIP('::ffff:101:101')).toBe(false);
+  });
+
+  it('allows public IPs', () => {
+    expect(isPrivateIP('8.8.8.8')).toBe(false);
+    expect(isPrivateIP('1.1.1.1')).toBe(false);
+    expect(isPrivateIP('93.184.216.34')).toBe(false);
   });
 });

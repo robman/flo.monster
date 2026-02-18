@@ -38,7 +38,7 @@ function formatScheduleRows(schedules: AdminScheduleInfo[]): Record<string, unkn
   return schedules.map(s => ({
     ...s,
     _trigger: s.type === 'cron' ? s.cronExpression : `${s.eventName}${s.eventCondition ? ' ' + s.eventCondition : ''}`,
-    _message: truncate(s.message, 20),
+    _message: s.tool ? `[tool: ${s.tool}]` : truncate(s.message || '', 20),
     _lastRun: s.lastRunAt ? formatTimestamp(s.lastRunAt) : '-',
     enabled: s.enabled ? 'yes' : 'no',
   }));
@@ -134,7 +134,8 @@ export async function agentsCommand(options: CommandOptions, args: string[]): Pr
               for (const s of schedResp.schedules) {
                 const trigger = s.type === 'cron' ? s.cronExpression : `${s.eventName}${s.eventCondition ? ' ' + s.eventCondition : ''}`;
                 const status = s.enabled ? 'enabled' : 'disabled';
-                console.log(`  ${s.id}  ${s.type}  ${trigger}  "${truncate(s.message, 30)}"  runs:${s.runCount}  ${status}`);
+                const desc = s.tool ? `[tool: ${s.tool}]` : `"${truncate(s.message || '', 30)}"`;
+                console.log(`  ${s.id}  ${s.type}  ${trigger}  ${desc}  runs:${s.runCount}  ${status}`);
               }
             }
           } catch {
@@ -254,6 +255,42 @@ export async function agentsCommand(options: CommandOptions, args: string[]): Pr
         break;
       }
 
+      case 'runjs-log': {
+        if (!agentId) {
+          error('Usage: hub-admin agents runjs-log <agent-id> [--limit N]');
+          process.exit(1);
+        }
+        const rjsLimit = limit !== undefined ? limit : 20;
+        const rjsResponse = await client.request(
+          { type: 'get_agent_runjs_log', agentId, limit: rjsLimit },
+          'agent_runjs_log',
+        );
+        if (options.json) {
+          output(rjsResponse.entries, null, { json: true });
+        } else if (rjsResponse.entries.length === 0) {
+          console.log('No runjs executions logged for this agent');
+        } else {
+          for (const entry of rjsResponse.entries) {
+            const ts = formatTimestamp(entry.ts);
+            const status = entry.error ? '\x1b[31mERROR\x1b[0m' : '\x1b[32mOK\x1b[0m';
+            const duration = `${entry.durationMs}ms`;
+            console.log(`[${ts}] ${status} (${duration})`);
+            console.log(`  Code: ${entry.code}`);
+            if (entry.consoleOutput && entry.consoleOutput.length > 0) {
+              console.log(`  Console: ${entry.consoleOutput.join(' | ')}`);
+            }
+            if (entry.error) {
+              console.log(`  Error: ${truncate(entry.error, 200)}`);
+            } else if (entry.result) {
+              const resultStr = typeof entry.result === 'string' ? entry.result : JSON.stringify(entry.result);
+              console.log(`  Result: ${truncate(resultStr, 200)}`);
+            }
+            console.log('');
+          }
+        }
+        break;
+      }
+
       case 'pause': {
         if (!agentId) {
           error('Usage: hub-admin agents pause <agent-id>');
@@ -300,7 +337,7 @@ export async function agentsCommand(options: CommandOptions, args: string[]): Pr
 
       default:
         error(`Unknown subcommand: ${subcommand}`);
-        console.log('Available: list, inspect, schedules, log, dom, pause, stop, kill, remove');
+        console.log('Available: list, inspect, schedules, log, dom, runjs-log, pause, stop, kill, remove');
         process.exit(1);
     }
   } finally {

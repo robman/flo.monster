@@ -186,7 +186,7 @@ describe('agent-handler', () => {
 
       const result = createRunnerDeps(session, hubAgentId, deps);
 
-      const toolResult = await result.executeToolCall('runjs', { code: 'test' });
+      const toolResult = await result.executeToolCall('view_state', {});
       expect(toolResult.is_error).toBe(true);
       expect(toolResult.content).toContain('browser-only tool');
     });
@@ -323,6 +323,49 @@ describe('agent-handler', () => {
       expect(events2.length).toBeGreaterThanOrEqual(1);
       expect(events1[0].event.type).toBe('state_change');
       expect(events2[0].event.type).toBe('state_change');
+    });
+
+    it('does NOT trigger push on loop_complete', async () => {
+      const client = createMockClient();
+      client.subscribedAgents.add(hubAgentId);
+      clients.add(client);
+
+      const mockPushManager = {
+        sendPush: vi.fn().mockResolvedValue(undefined),
+      };
+
+      setupEventForwarding(runner, hubAgentId, clients, mockPushManager as any);
+
+      // Start the runner to trigger events (state_change, possibly loop_complete)
+      await runner.start();
+
+      // loop_complete should NOT trigger push
+      expect(mockPushManager.sendPush).not.toHaveBeenCalled();
+    });
+
+    it('triggers push on notify_user event', async () => {
+      const client = createMockClient();
+      client.subscribedAgents.add(hubAgentId);
+      clients.add(client);
+
+      const mockPushManager = {
+        sendPush: vi.fn().mockResolvedValue(undefined),
+      };
+
+      setupEventForwarding(runner, hubAgentId, clients, mockPushManager as any);
+
+      // Start runner first so it's in running state
+      await runner.start();
+
+      // Manually emit a notify_user event via emitRunnerEvent
+      runner.emitRunnerEvent({ type: 'notify_user', timestamp: Date.now(), data: { message: 'Hello!' } });
+
+      expect(mockPushManager.sendPush).toHaveBeenCalledWith({
+        title: 'flo.monster',
+        body: 'Hello!',
+        tag: `notify-${hubAgentId}`,
+        agentId: hubAgentId,
+      });
     });
   });
 

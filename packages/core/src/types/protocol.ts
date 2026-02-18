@@ -278,7 +278,8 @@ export type AdminToHub =
   | { type: 'nuke'; target: 'agents' | 'clients' | 'all' }
   | { type: 'get_agent_schedules'; agentId?: string }
   | { type: 'get_agent_log'; agentId: string; limit?: number }
-  | { type: 'get_agent_dom'; agentId: string };
+  | { type: 'get_agent_dom'; agentId: string }
+  | { type: 'get_agent_runjs_log'; agentId: string; limit?: number };
 
 // Hub → Admin WebSocket messages
 export type HubToAdmin =
@@ -297,7 +298,8 @@ export type HubToAdmin =
   | { type: 'ok'; message?: string }
   | { type: 'agent_schedules'; schedules: AdminScheduleInfo[] }
   | { type: 'agent_log'; agentId: string; messages: Array<{ role: string; content: ContentBlock[]; timestamp: number }> }
-  | { type: 'agent_dom'; agentId: string; domState: SerializedDomState | null };
+  | { type: 'agent_dom'; agentId: string; domState: SerializedDomState | null }
+  | { type: 'agent_runjs_log'; agentId: string; entries: Array<{ ts: number; code: string; result?: unknown; error?: string; consoleOutput: string[]; durationMs: number }> };
 
 // Supporting types for admin protocol
 export interface AdminAgentInfo {
@@ -321,12 +323,14 @@ export interface AdminScheduleInfo {
   cronExpression?: string;
   eventName?: string;
   eventCondition?: string;
-  message: string;
+  message?: string;
   enabled: boolean;
   runCount: number;
   lastRunAt?: number;
   createdAt: number;
   maxRuns?: number;
+  tool?: string;
+  toolInput?: Record<string, unknown>;
 }
 
 export interface AdminConnectionInfo {

@@ -14,16 +14,19 @@ export interface ScheduleEntry {
   cronExpression?: string;      // "*/5 * * * *"
   eventName?: string;           // "state:score", "browser:connected"
   eventCondition?: string;      // "> 100" (for state events)
-  message: string;              // sent to agent when triggered
+  message?: string;             // sent to agent when triggered (required if no tool)
   enabled: boolean;
   maxRuns?: number;             // stop after N runs (undefined = unlimited)
   runCount: number;
   createdAt: number;
   lastRunAt?: number;
+  tool?: string;                // tool to execute directly (no agent wakeup)
+  toolInput?: Record<string, unknown>;  // input for direct tool execution
 }
 
 export interface SchedulerDeps {
   getRunner: (hubAgentId: string) => HeadlessAgentRunner | undefined;
+  executeToolForAgent?: (hubAgentId: string, toolName: string, toolInput: Record<string, unknown>) => Promise<{ content: string; is_error?: boolean }>;
 }
 
 /** Max schedules per agent */
@@ -65,9 +68,11 @@ export class Scheduler {
     cronExpression?: string;
     eventName?: string;
     eventCondition?: string;
-    message: string;
+    message?: string;
     enabled?: boolean;
     maxRuns?: number;
+    tool?: string;
+    toolInput?: Record<string, unknown>;
   }): string {
     // Validate
     if (params.type === 'cron') {
@@ -78,6 +83,14 @@ export class Scheduler {
     }
     if (params.type === 'event') {
       if (!params.eventName) throw new Error('eventName required for event type');
+    }
+
+    // Must have exactly one of message or tool
+    if (params.message && params.tool) {
+      throw new Error('Cannot specify both message and tool — use one or the other');
+    }
+    if (!params.message && !params.tool) {
+      throw new Error('Must specify either message or tool');
     }
 
     // Check max schedules per agent
@@ -99,6 +112,8 @@ export class Scheduler {
       maxRuns: params.maxRuns,
       runCount: 0,
       createdAt: Date.now(),
+      tool: params.tool,
+      toolInput: params.toolInput,
     };
 
     this.entries.set(id, entry);
@@ -156,7 +171,9 @@ export class Scheduler {
         if (!Scheduler.evaluateCondition(entry.eventCondition, data)) continue;
       }
 
-      this.triggerEntry(entry);
+      void this.triggerEntry(entry).catch(err => {
+        console.warn(`[Scheduler] Failed to trigger ${entry.id}:`, err);
+      });
     }
   }
 
@@ -292,13 +309,55 @@ export class Scheduler {
       if (!entry.cronExpression) continue;
 
       if (Scheduler.shouldRunCron(entry.cronExpression, now)) {
-        this.triggerEntry(entry);
+        void this.triggerEntry(entry).catch(err => {
+          console.warn(`[Scheduler] Failed to trigger ${entry.id}:`, err);
+        });
       }
     }
   }
 
-  /** Trigger a schedule entry — send message to agent */
-  private triggerEntry(entry: ScheduleEntry): void {
+  /** Trigger a schedule entry — send message to agent or execute tool directly */
+  private async triggerEntry(entry: ScheduleEntry): Promise<void> {
+    // Direct tool execution — no runner needed
+    if (entry.tool) {
+      if (!this.deps.executeToolForAgent) {
+        console.warn(`[Scheduler] No executeToolForAgent — cannot execute tool for ${entry.id}`);
+        return;
+      }
+
+      // Still need runner to be running for agent context
+      const runner = this.deps.getRunner(entry.hubAgentId);
+      if (!runner) return;
+      const state = runner.getState();
+      if (state !== 'running') return;
+
+      // Update run count before execution
+      entry.runCount++;
+      entry.lastRunAt = Date.now();
+
+      // Check maxRuns — disable after reaching limit
+      if (entry.maxRuns !== undefined && entry.runCount >= entry.maxRuns) {
+        entry.enabled = false;
+      }
+
+      try {
+        const result = await this.deps.executeToolForAgent(entry.hubAgentId, entry.tool, entry.toolInput || {});
+        if (result.is_error) {
+          // Tool returned an error — notify the agent so it can self-correct
+          runner.queueMessage(
+            `[Scheduled task "${entry.id}" failed] Tool "${entry.tool}" returned error:\n${result.content}`
+          );
+        }
+      } catch (err) {
+        // Execution threw — notify the agent
+        runner.queueMessage(
+          `[Scheduled task "${entry.id}" failed] Tool "${entry.tool}" threw:\n${err instanceof Error ? err.message : String(err)}`
+        );
+      }
+      return;
+    }
+
+    // Message-based trigger — wake the agent
     const runner = this.deps.getRunner(entry.hubAgentId);
     if (!runner) return;
 
@@ -320,7 +379,7 @@ export class Scheduler {
 
     // Send the trigger message
     try {
-      runner.sendMessage(entry.message);
+      runner.sendMessage(entry.message!);
     } catch (err) {
       console.warn(`[Scheduler] Failed to trigger ${entry.id} for ${entry.hubAgentId}:`, err);
     }

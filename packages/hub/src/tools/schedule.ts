@@ -11,7 +11,9 @@ export interface ScheduleToolInput {
   cron?: string;            // cron expression
   event?: string;           // event name (e.g., "state:score", "browser:connected")
   condition?: string;       // for event triggers (e.g., "> 100", "changed")
-  message?: string;         // message to send on trigger
+  message?: string;         // message to send on trigger (wakes agent)
+  tool?: string;            // tool to execute directly (no agent wakeup)
+  toolInput?: Record<string, unknown>;  // input for direct tool execution
   maxRuns?: number;
   id?: string;              // for remove/enable/disable
 }
@@ -21,7 +23,8 @@ export const scheduleToolDef: ToolDef = {
   description: 'Schedule cron jobs and event triggers for autonomous execution. ' +
     'Actions: add (create schedule), remove (delete by id), list (show all), enable/disable (toggle). ' +
     'Types: cron (periodic, e.g. "*/5 * * * *" = every 5 min), event (reactive, e.g. "state:score" with condition "> 100"). ' +
-    'When triggered, the agent receives the specified message as if sent by a user. ' +
+    'Two trigger modes: "message" wakes the agent with a user message, "tool" executes a tool directly without waking the agent. ' +
+    'Specify exactly one of message or tool. ' +
     'Max 10 schedules per agent, minimum 1-minute cron interval.',
   input_schema: {
     type: 'object',
@@ -50,7 +53,15 @@ export const scheduleToolDef: ToolDef = {
       },
       message: {
         type: 'string',
-        description: 'Message sent to agent when triggered (required for add)',
+        description: 'Message sent to agent when triggered — wakes the agent for an LLM loop. Use this OR tool, not both.',
+      },
+      tool: {
+        type: 'string',
+        description: 'Tool name to execute directly when triggered — no LLM loop. E.g. "runjs" to run code directly. Use this OR message, not both.',
+      },
+      toolInput: {
+        type: 'object',
+        description: 'Input for the tool when using direct tool execution. E.g. { "code": "flo.push({title: \\"Reminder\\", body: \\"Check tasks\\"})" }',
       },
       maxRuns: {
         type: 'number',
@@ -76,8 +87,11 @@ export function executeScheduleTool(
         if (!input.type) {
           return { content: 'Missing required parameter: type (cron or event)', is_error: true };
         }
-        if (!input.message) {
-          return { content: 'Missing required parameter: message', is_error: true };
+        if (!input.message && !input.tool) {
+          return { content: 'Missing required parameter: message or tool', is_error: true };
+        }
+        if (input.message && input.tool) {
+          return { content: 'Cannot specify both message and tool — use one or the other', is_error: true };
         }
 
         const id = scheduler.addSchedule({
@@ -87,6 +101,8 @@ export function executeScheduleTool(
           eventName: input.event,
           eventCondition: input.condition,
           message: input.message,
+          tool: input.tool,
+          toolInput: input.toolInput,
           maxRuns: input.maxRuns,
         });
 
@@ -97,6 +113,7 @@ export function executeScheduleTool(
             type: input.type,
             ...(input.cron ? { cron: input.cron } : {}),
             ...(input.event ? { event: input.event } : {}),
+            ...(input.tool ? { tool: input.tool } : {}),
             ...(input.maxRuns !== undefined ? { maxRuns: input.maxRuns } : {}),
           }),
         };
@@ -125,7 +142,9 @@ export function executeScheduleTool(
               ...(s.cronExpression ? { cron: s.cronExpression } : {}),
               ...(s.eventName ? { event: s.eventName } : {}),
               ...(s.eventCondition ? { condition: s.eventCondition } : {}),
-              message: s.message,
+              ...(s.message ? { message: s.message } : {}),
+              ...(s.tool ? { tool: s.tool } : {}),
+              ...(s.toolInput ? { toolInput: s.toolInput } : {}),
               runCount: s.runCount,
               ...(s.maxRuns !== undefined ? { maxRuns: s.maxRuns } : {}),
               ...(s.lastRunAt ? { lastRunAt: s.lastRunAt } : {}),
