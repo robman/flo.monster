@@ -6,32 +6,50 @@ import type { AgentConfig } from '../types/agent.js';
 import type { AgentEvent } from '../types/events.js';
 import type { ProviderAdapter, CostEstimate, SSEEvent, ModelInfo } from '../types/provider.js';
 import { calculateCost } from './cost-utils.js';
+import { resolveModelId } from './model-aliases.js';
 
 // Model pricing (per million tokens)
 const MODEL_INFO: Record<string, ModelInfo> = {
-  // Claude 4.5 series (current generation - Nov 2025)
+  // Claude 4.6 series (current generation)
+  'claude-opus-4-6': {
+    id: 'claude-opus-4-6',
+    displayName: 'Claude Opus 4.6',
+    provider: 'anthropic',
+    contextWindow: 200000,
+    maxOutputTokens: 131072,
+    pricing: { inputPerMillion: 5.0, outputPerMillion: 25.0, cacheCreationPerMillion: 6.25, cacheReadPerMillion: 0.5 },
+  },
+  'claude-sonnet-4-6': {
+    id: 'claude-sonnet-4-6',
+    displayName: 'Claude Sonnet 4.6',
+    provider: 'anthropic',
+    contextWindow: 200000,
+    maxOutputTokens: 65536,
+    pricing: { inputPerMillion: 3.0, outputPerMillion: 15.0, cacheCreationPerMillion: 3.75, cacheReadPerMillion: 0.3 },
+  },
+  // Claude 4.5 series
   'claude-opus-4-5-20251101': {
     id: 'claude-opus-4-5-20251101',
     displayName: 'Claude Opus 4.5',
     provider: 'anthropic',
     contextWindow: 200000,
-    maxOutputTokens: 32768,
+    maxOutputTokens: 65536,
     pricing: { inputPerMillion: 5.0, outputPerMillion: 25.0, cacheCreationPerMillion: 6.25, cacheReadPerMillion: 0.5 },
   },
-  'claude-sonnet-4-5-20251101': {
-    id: 'claude-sonnet-4-5-20251101',
+  'claude-sonnet-4-5-20250929': {
+    id: 'claude-sonnet-4-5-20250929',
     displayName: 'Claude Sonnet 4.5',
     provider: 'anthropic',
     contextWindow: 200000,
-    maxOutputTokens: 16384,
+    maxOutputTokens: 65536,
     pricing: { inputPerMillion: 3.0, outputPerMillion: 15.0, cacheCreationPerMillion: 3.75, cacheReadPerMillion: 0.3 },
   },
-  'claude-haiku-4-5-20251101': {
-    id: 'claude-haiku-4-5-20251101',
+  'claude-haiku-4-5-20251001': {
+    id: 'claude-haiku-4-5-20251001',
     displayName: 'Claude Haiku 4.5',
     provider: 'anthropic',
     contextWindow: 200000,
-    maxOutputTokens: 8192,
+    maxOutputTokens: 65536,
     pricing: { inputPerMillion: 1.0, outputPerMillion: 5.0, cacheCreationPerMillion: 1.25, cacheReadPerMillion: 0.1 },
   },
   // Claude 4 series
@@ -40,7 +58,7 @@ const MODEL_INFO: Record<string, ModelInfo> = {
     displayName: 'Claude Sonnet 4',
     provider: 'anthropic',
     contextWindow: 200000,
-    maxOutputTokens: 16384,
+    maxOutputTokens: 65536,
     pricing: { inputPerMillion: 3.0, outputPerMillion: 15.0, cacheCreationPerMillion: 3.75, cacheReadPerMillion: 0.3 },
   },
   'claude-opus-4-20250514': {
@@ -267,7 +285,7 @@ export function createAnthropicAdapter(): ProviderAdapter {
     },
 
     estimateCost(model: string, usage: TokenUsage): CostEstimate {
-      const info = MODEL_INFO[model];
+      const info = MODEL_INFO[resolveModelId(model)];
       if (!info) {
         return { inputCost: 0, outputCost: 0, totalCost: 0, currency: 'USD' };
       }

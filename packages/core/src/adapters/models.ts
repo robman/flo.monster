@@ -1,6 +1,8 @@
 import type { ProviderAdapter, ModelInfo } from '../types/provider.js';
 import { createAnthropicAdapter, MODEL_INFO as ANTHROPIC_MODELS } from './anthropic.js';
 import { createOpenAIChatAdapter, OPENAI_MODELS, GEMINI_MODELS } from './openai.js';
+export { MODEL_ALIASES, resolveModelId } from './model-aliases.js';
+import { resolveModelId } from './model-aliases.js';
 
 /**
  * Combined model registry across all providers.
@@ -19,18 +21,18 @@ export function getModelsForProvider(provider: string): ModelInfo[] {
 }
 
 /**
- * Get a model by its ID.
+ * Get a model by its ID. Resolves aliases first.
  */
 export function getModelInfo(modelId: string): ModelInfo | undefined {
-  return ALL_MODELS[modelId];
+  return ALL_MODELS[resolveModelId(modelId)];
 }
 
 /**
- * Get the provider for a model ID.
+ * Get the provider for a model ID. Resolves aliases first.
  * Returns 'anthropic' for unknown models (backward compatibility).
  */
 export function getProviderForModel(modelId: string): string {
-  const model = ALL_MODELS[modelId];
+  const model = ALL_MODELS[resolveModelId(modelId)];
   return model?.provider || 'anthropic';
 }
 

@@ -7,7 +7,7 @@ import type { CostTracker, SerializedDomState } from '@flo-monster/core';
 import type { AgentContainer } from '../agent/agent-container.js';
 import { getStorageProvider } from '../storage/agent-storage.js';
 
-const DEFAULT_MODEL = 'claude-sonnet-4-20250514';
+const DEFAULT_MODEL = 'claude-sonnet-4-6';
 
 export interface LifecycleManagerDeps {
   agentManager: AgentManager;

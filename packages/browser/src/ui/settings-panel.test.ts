@@ -155,7 +155,7 @@ describe('SettingsPanel', () => {
 
     const select = container.querySelector('.settings-model-select') as HTMLSelectElement;
     expect(select).toBeTruthy();
-    expect(select.options.length).toBe(6); // 6 Anthropic models in MODEL_INFO
+    expect(select.options.length).toBe(8); // 8 Anthropic models in MODEL_INFO
   });
 
   it('renders budget inputs', async () => {

@@ -134,7 +134,7 @@ describe('AgentManager', () => {
     const agent = manager.createAgent();
     expect(agent).toBeDefined();
     expect(agent.config.name).toBe('Agent 1');
-    expect(agent.config.model).toBe('claude-sonnet-4-20250514');
+    expect(agent.config.model).toBe('claude-sonnet-4-6');
     expect(relay.registerAgent).toHaveBeenCalledWith(agent);
   });
 
@@ -521,13 +521,13 @@ describe('AgentManager', () => {
       const agent = await manager.createFromTemplate(templateManager, {
         templateName: 'my-template',
         overrides: {
-          model: 'claude-sonnet-4-20250514',
+          model: 'claude-sonnet-4-6',
           systemPrompt: 'Overridden prompt',
           maxTokens: 4096,
         },
       });
 
-      expect(agent.config.model).toBe('claude-sonnet-4-20250514');
+      expect(agent.config.model).toBe('claude-sonnet-4-6');
       expect(agent.config.systemPrompt).toContain('Overridden prompt');
       expect(agent.config.maxTokens).toBe(4096);
     });
@@ -589,7 +589,7 @@ describe('AgentManager', () => {
         templateName: 'minimal-template',
       });
 
-      expect(agent.config.model).toBe('claude-sonnet-4-20250514');
+      expect(agent.config.model).toBe('claude-sonnet-4-6');
       expect(agent.config.maxTokens).toBe(16384);
     });
 

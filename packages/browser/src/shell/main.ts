@@ -35,7 +35,7 @@ import type { HubAgentSummary } from '@flo-monster/core';
 // @ts-ignore - raw import of worker bundle
 import workerCode from '../agent/worker-bundle.js?raw';
 
-const DEFAULT_MODEL = 'claude-sonnet-4-20250514';
+const DEFAULT_MODEL = 'claude-sonnet-4-6';
 
 /**
  * Shell class - main application coordinator

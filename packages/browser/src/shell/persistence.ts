@@ -104,7 +104,7 @@ export class PersistenceLayer {
 
   async getSettings(): Promise<AppSettings> {
     const defaults: AppSettings = {
-      defaultModel: 'claude-sonnet-4-20250514',
+      defaultModel: 'claude-sonnet-4-6',
       enabledExtensions: [],
     };
 

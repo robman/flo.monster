@@ -53,7 +53,7 @@ describe('PersistenceLayer', () => {
 
   it('settings save/load roundtrip with apiBaseUrl', async () => {
     const settings: AppSettings = {
-      defaultModel: 'claude-sonnet-4-20250514',
+      defaultModel: 'claude-sonnet-4-6',
       enabledExtensions: [],
       apiBaseUrl: 'https://api.flo.monster',
     };
@@ -66,7 +66,7 @@ describe('PersistenceLayer', () => {
 
   it('getSettings returns undefined apiBaseUrl when not set', async () => {
     const settings: AppSettings = {
-      defaultModel: 'claude-sonnet-4-20250514',
+      defaultModel: 'claude-sonnet-4-6',
       enabledExtensions: [],
     };
 
@@ -78,7 +78,7 @@ describe('PersistenceLayer', () => {
 
   it('getSettings returns defaults when empty', async () => {
     const settings = await persistence.getSettings();
-    expect(settings.defaultModel).toBe('claude-sonnet-4-20250514');
+    expect(settings.defaultModel).toBe('claude-sonnet-4-6');
     expect(settings.enabledExtensions).toEqual([]);
   });
 
@@ -86,7 +86,7 @@ describe('PersistenceLayer', () => {
     const config = {
       id: 'agent-1',
       name: 'Test Agent',
-      model: 'claude-sonnet-4-20250514',
+      model: 'claude-sonnet-4-6',
       systemPrompt: 'You are helpful.',
       tools: [],
       maxTokens: 4096,
@@ -94,7 +94,7 @@ describe('PersistenceLayer', () => {
     const metadata: AgentMetadata = {
       id: 'agent-1',
       name: 'Test Agent',
-      model: 'claude-sonnet-4-20250514',
+      model: 'claude-sonnet-4-6',
       createdAt: 1000,
       lastActiveAt: 2000,
       totalCost: 0.05,
@@ -232,7 +232,7 @@ describe('PersistenceLayer', () => {
 
     // Should get defaults
     const settings = await persistence.getSettings();
-    expect(settings.defaultModel).toBe('claude-sonnet-4-20250514');
+    expect(settings.defaultModel).toBe('claude-sonnet-4-6');
     expect(await persistence.listAgents()).toEqual([]);
     expect(await persistence.loadConversation('agent-1')).toEqual([]);
   });
@@ -300,7 +300,7 @@ describe('PersistenceLayer', () => {
         {
           id: 'agent-1',
           name: 'Test Agent',
-          model: 'claude-sonnet-4-20250514',
+          model: 'claude-sonnet-4-6',
           systemPrompt: 'You are helpful',
           tools: [],
           maxTokens: 4096,

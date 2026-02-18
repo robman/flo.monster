@@ -145,7 +145,7 @@ export class AgentManager {
     const partialConfig: AgentConfig = {
       id: agentId,
       name,
-      model: options.model || 'claude-sonnet-4-20250514',
+      model: options.model || 'claude-sonnet-4-6',
       provider: options.provider,
       systemPrompt: basePrompt,
       tools: options.tools || [],
@@ -201,7 +201,7 @@ export class AgentManager {
     const partialConfig: AgentConfig = {
       id: agentId,
       name,
-      model: options.overrides?.model ?? template.manifest.config.model ?? 'claude-sonnet-4-20250514',
+      model: options.overrides?.model ?? template.manifest.config.model ?? 'claude-sonnet-4-6',
       systemPrompt: basePrompt,
       tools: template.manifest.config.tools?.map(toolName => ({
         name: toolName,
