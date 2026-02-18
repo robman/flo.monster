@@ -5,6 +5,7 @@
 ## What is flo.monster?
 
 What if AI didn't just create interactive web content — but actually lived in it?
+[Read the vision post here.](https://medium.com/data-science-collective/re-defining-the-agentic-web-cfeb49e0d4e7)
 
 flo.monster gives each agent a **living skin**: a web page it actively controls and inhabits. The agent can create forms, games, 3D visualisations, access your camera and sensors — but not just so you can use them. It literally sees and responds when you interact. This isn't something generated for you to look at. It's a space you share. You shape it. It shapes it. Together.
 
