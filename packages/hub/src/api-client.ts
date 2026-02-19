@@ -4,8 +4,7 @@
  */
 
 import type { HubConfig } from './config.js';
-import { buildCliArgs, formatMessagesAsPrompt, parseStreamLine, formatSSE, type CliProxyConfig } from './cli-proxy.js';
-import { spawn } from 'node:child_process';
+import { streamCliEvents, type CliProxyConfig, type CliProxyRequest } from './cli-proxy.js';
 
 export interface ApiClientConfig {
   hubConfig: HubConfig;
@@ -126,70 +125,12 @@ async function* sendApiRequest(
 
 /**
  * Send an API request through CLI proxy, yielding SSE-formatted strings.
- * Adapts cli-proxy.ts for use as an AsyncGenerator instead of ServerResponse.
+ * Delegates to the shared streamCliEvents() generator.
  */
 async function* sendCliProxyApiRequest(
   body: string,
   config: CliProxyConfig,
 ): AsyncGenerator<string> {
-  const req = JSON.parse(body);
-  const command = config.command || 'claude';
-  const timeout = config.timeout || 120000;
-  const args = buildCliArgs(req, config);
-  const prompt = formatMessagesAsPrompt(req.messages);
-
-  const result = await new Promise<string>((resolve, reject) => {
-    let proc;
-    try {
-      proc = spawn(command, args, {
-        stdio: ['pipe', 'pipe', 'pipe'],
-        env: { ...process.env },
-      });
-    } catch (err) {
-      reject(new Error(`Failed to spawn CLI: ${(err as Error).message}`));
-      return;
-    }
-
-    const timeoutHandle = setTimeout(() => {
-      proc.kill('SIGKILL');
-      reject(new Error('CLI proxy timeout'));
-    }, timeout);
-
-    if (proc.stdin) {
-      proc.stdin.write(prompt);
-      proc.stdin.end();
-    }
-
-    let stdoutBuffer = '';
-    proc.stdout?.on('data', (chunk: Buffer) => {
-      stdoutBuffer += chunk.toString();
-    });
-
-    let stderrOutput = '';
-    proc.stderr?.on('data', (chunk: Buffer) => {
-      stderrOutput += chunk.toString();
-    });
-
-    proc.on('close', (code) => {
-      clearTimeout(timeoutHandle);
-      if (code !== 0 && stderrOutput) {
-        console.error(`[api-client] CLI process exited with code ${code}: ${stderrOutput.slice(0, 500)}`);
-      }
-      resolve(stdoutBuffer);
-    });
-
-    proc.on('error', (err) => {
-      clearTimeout(timeoutHandle);
-      reject(new Error(`CLI proxy error: ${err.message}`));
-    });
-  });
-
-  // Parse CLI output and yield as SSE strings
-  const lines = result.split('\n').filter(l => l.trim());
-  for (const line of lines) {
-    const events = parseStreamLine(line);
-    for (const event of events) {
-      yield formatSSE(event);
-    }
-  }
+  const req = JSON.parse(body) as CliProxyRequest;
+  yield* streamCliEvents(req, config);
 }

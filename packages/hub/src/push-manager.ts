@@ -81,9 +81,6 @@ export class PushManager {
    * Register a push subscription for a device. Generates a PIN for verification.
    */
   async subscribe(deviceId: string, subscription: { endpoint: string; keys: { p256dh: string; auth: string } }): Promise<{ pin: string } | { error: string }> {
-    console.log('[push] subscribe() called, deviceId:', deviceId, 'endpoint:', subscription.endpoint.substring(0, 60) + '...');
-    console.log('[push] isEnabled:', this.isEnabled, 'keys present:', !!subscription.keys.p256dh, !!subscription.keys.auth);
-
     if (!this.isEnabled) return { error: 'Push notifications not enabled' };
 
     const pin = this.generatePin();
@@ -102,13 +99,11 @@ export class PushManager {
 
     // Send test notification with PIN
     try {
-      console.log('[push] Sending test notification with PIN...');
       await this.sendRawPush(sub, {
         title: 'flo.monster',
         body: `Your verification PIN is: ${pin}`,
         tag: 'pin-verification',
       });
-      console.log('[push] Test notification sent successfully! PIN:', pin);
     } catch (err: any) {
       console.error('[push] Test notification failed:', {
         statusCode: err.statusCode,

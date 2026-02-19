@@ -1611,6 +1611,9 @@ export function generateBootstrapScript(agentId: string): string {
     placeholderRemoved = true;
     var ph = document.querySelector('.agent-placeholder');
     if (ph) ph.remove();
+    // Remove default head styles so querySelector('style') finds the agent's styles
+    var defaultStyle = document.querySelector('style[data-flo-default]');
+    if (defaultStyle) defaultStyle.remove();
   }
 
   function getRenderedInfo(el) {
@@ -1951,7 +1954,7 @@ export function generateIframeSrcdoc(agentId: string, agentName: string): string
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<style>
+<style data-flo-default>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: system-ui, -apple-system, sans-serif; min-height: 100vh; }
   /* Default placeholder - agents can remove/replace this */

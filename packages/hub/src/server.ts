@@ -445,7 +445,8 @@ export function createHubServer(config: HubConfig): HubServer {
         return;
       }
 
-      console.log(`[hub] Received message: ${data.toString().slice(0, 200)}`);
+      // Verbose per-message logging — uncomment for debugging
+      // console.log(`[hub] Received message: ${data.toString().slice(0, 200)}`);
       const message = parseWsMessage<{ type: string; id?: string; [key: string]: unknown }>(data);
       if (!message) {
         sendWsMessage(ws, {

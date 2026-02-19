@@ -3,10 +3,16 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi, type Mock } from 'vitest';
+
+vi.mock('../cli-proxy.js', () => ({
+  streamCliEvents: vi.fn(),
+}));
+
 import { handleMessage } from '../handlers/message-handler.js';
 import { getDefaultConfig, type HubConfig } from '../config.js';
 import type { ConnectedClient } from '../server.js';
 import type { HeadlessAgentRunner } from '../agent-runner.js';
+import { streamCliEvents } from '../cli-proxy.js';
 
 const originalFetch = globalThis.fetch;
 
@@ -162,21 +168,53 @@ describe('API Proxy Handler', () => {
     }));
   });
 
-  it('sends api_error for CLI proxy providers', async () => {
+  it('streams CLI proxy response over WebSocket', async () => {
     config.cliProviders = { anthropic: { command: 'claude-cli' } as any };
+
+    // Mock streamCliEvents to yield SSE chunks
+    const mockStreamCliEvents = vi.mocked(streamCliEvents);
+    mockStreamCliEvents.mockReturnValue((async function*() {
+      yield 'event: message_start\ndata: {"type":"message_start"}\n\n';
+      yield 'event: message_stop\ndata: {"type":"message_stop"}\n\n';
+    })());
 
     await handleMessage(mockClient, {
       type: 'api_proxy_request',
       id: 'req-5',
       provider: 'anthropic',
       path: '/api/anthropic/v1/messages',
-      payload: {},
+      payload: { messages: [{ role: 'user', content: 'hi' }] },
+    }, config, agents, clients);
+
+    const chunkMessages = sentMessages.filter(m => m.type === 'api_stream_chunk');
+    const endMessages = sentMessages.filter(m => m.type === 'api_stream_end');
+    expect(chunkMessages.length).toBe(2);
+    expect(chunkMessages[0].chunk).toContain('message_start');
+    expect(chunkMessages[1].chunk).toContain('message_stop');
+    expect(endMessages.length).toBe(1);
+    expect(endMessages[0].id).toBe('req-5');
+  });
+
+  it('sends api_error when CLI proxy fails over WebSocket', async () => {
+    config.cliProviders = { anthropic: { command: 'claude-cli' } as any };
+
+    const mockStreamCliEvents = vi.mocked(streamCliEvents);
+    mockStreamCliEvents.mockReturnValue((async function*() {
+      throw new Error('CLI proxy timeout');
+    })());
+
+    await handleMessage(mockClient, {
+      type: 'api_proxy_request',
+      id: 'req-cli-err',
+      provider: 'anthropic',
+      path: '/api/anthropic/v1/messages',
+      payload: { messages: [{ role: 'user', content: 'hi' }] },
     }, config, agents, clients);
 
     expect(sentMessages).toContainEqual(expect.objectContaining({
       type: 'api_error',
-      id: 'req-5',
-      error: 'CLI proxy not supported via WebSocket',
+      id: 'req-cli-err',
+      error: expect.stringContaining('CLI proxy timeout'),
     }));
   });
 

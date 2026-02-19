@@ -100,7 +100,7 @@ describe('hub-runjs', () => {
   // ---- Context validation ----
 
   describe('context validation', () => {
-    it('silently ignores iframe context and runs as worker', async () => {
+    it('falls back to worker when context:"iframe" reaches hub (no browser available)', async () => {
       const deps = createDeps();
       const promise = executeHubRunJs({ code: '1+1', context: 'iframe' }, deps);
 

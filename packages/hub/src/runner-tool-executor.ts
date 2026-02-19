@@ -174,8 +174,16 @@ async function executeRunnerToolCall(
     };
   }
 
-  // Hub-side runjs: execute locally if state/storage stores available, else route to browser
+  // Hub-side runjs: route context:"iframe" to browser if available, else execute locally
   if (name === 'runjs') {
+    const runJsInput = input as { code: string; context?: string };
+
+    // context:"iframe" requires a real browser (DOM APIs, document, etc.)
+    if (runJsInput.context === 'iframe' && deps.browserToolRouter && deps.hubAgentId
+        && deps.browserToolRouter.isAvailable(deps.hubAgentId)) {
+      return deps.browserToolRouter.routeToBrowser(deps.hubAgentId, name, input);
+    }
+
     if (deps.stateStore && deps.storageStore && deps.hubAgentId) {
       // Create a reference to the executor for flo.callTool() support
       const executor = createToolExecutor(deps);
@@ -190,7 +198,7 @@ async function executeRunnerToolCall(
         executeToolCall: executor,
         agentDataDir: deps.agentDataDir,
       };
-      return executeHubRunJs(input as { code: string; context?: string }, runJsDeps);
+      return executeHubRunJs(runJsInput, runJsDeps);
     }
     // Fall through to browser routing if no hub deps
     if (deps.browserToolRouter && deps.hubAgentId) {

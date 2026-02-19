@@ -44,6 +44,7 @@ import type {
   ApiProxyRequestMessage,
 } from './types.js';
 import { getProviderRoute } from '../http-server.js';
+import { streamCliEvents, type CliProxyRequest } from '../cli-proxy.js';
 
 // ============================================================================
 // Audit logging
@@ -231,7 +232,8 @@ async function handleApiProxyRequest(
   try {
     // 1. Resolve provider route from path
     const route = getProviderRoute(message.path, config);
-    console.log(`[hub] api_proxy: route=${route ? `${route.provider} → ${route.upstreamUrl}` : 'null'}`);
+    // Verbose per-request logging — uncomment for debugging
+    // console.log(`[hub] api_proxy: route=${route ? `${route.provider} → ${route.upstreamUrl}` : 'null'}`);
     if (!route) {
       sendWsMessage(client.ws, {
         type: 'api_error',
@@ -241,13 +243,25 @@ async function handleApiProxyRequest(
       return;
     }
 
-    // 2. CLI proxy not supported over WebSocket (needs HTTP streaming)
+    // 2. CLI proxy — stream via streamCliEvents()
     if (config.cliProviders?.[route.provider]) {
-      sendWsMessage(client.ws, {
-        type: 'api_error',
-        id: message.id,
-        error: 'CLI proxy not supported via WebSocket',
-      });
+      const cliConfig = config.cliProviders[route.provider];
+      try {
+        for await (const sseChunk of streamCliEvents(message.payload as CliProxyRequest, cliConfig)) {
+          sendWsMessage(client.ws, {
+            type: 'api_stream_chunk',
+            id: message.id,
+            chunk: sseChunk,
+          });
+        }
+        sendWsMessage(client.ws, { type: 'api_stream_end', id: message.id });
+      } catch (err) {
+        sendWsMessage(client.ws, {
+          type: 'api_error',
+          id: message.id,
+          error: `CLI proxy error: ${(err as Error).message}`,
+        });
+      }
       return;
     }
 
@@ -360,9 +374,7 @@ export async function handleMessage(
   // Handle authentication
   if (message.type === 'auth') {
     const authMessage = message as AuthMessage;
-    console.log(`[hub] Auth attempt from ${client.remoteAddress}, token provided: ${!!authMessage.token}`);
     const valid = validateToken(authMessage.token, config, client.remoteAddress);
-    console.log(`[hub] Auth result: ${valid ? 'valid' : 'invalid'}`);
 
     auditLog({
       timestamp: new Date().toISOString(),
@@ -395,7 +407,7 @@ export async function handleMessage(
         ],
         httpApiUrl,
       };
-      console.log(`[hub] Sending auth_result success`);
+      console.log(`[hub] Auth success from ${client.remoteAddress}`);
       sendWsMessage(client.ws, authResult);
 
       // Then announce available tools
@@ -404,7 +416,6 @@ export async function handleMessage(
         type: 'announce_tools',
         tools,
       };
-      console.log(`[hub] Sending announce_tools with ${tools.length} tools`);
       sendWsMessage(client.ws, announceTools);
 
       // Send VAPID public key if push is enabled
@@ -425,7 +436,7 @@ export async function handleMessage(
         hubName: '',
         error: 'Authentication failed',
       };
-      console.log(`[hub] Sending auth_result failure`);
+      console.log(`[hub] Auth failure from ${client.remoteAddress}`);
       sendWsMessage(client.ws, authResult);
       client.ws.close(4001, 'Authentication failed');
     }
@@ -550,11 +561,9 @@ export async function handleMessage(
 
   // Handle push_subscribe
   if (message.type === 'push_subscribe') {
-    console.log('[hub] push_subscribe handler, pushManager available:', !!pushManager);
     if (pushManager) {
       const { deviceId, subscription } = message as { type: string; deviceId: string; subscription: { endpoint: string; keys: { p256dh: string; auth: string } } };
       const result = await pushManager.subscribe(deviceId, subscription);
-      console.log('[hub] push_subscribe result:', JSON.stringify(result));
       if ('error' in result) {
         sendWsMessage(client.ws, {
           type: 'push_subscribe_result',
@@ -570,7 +579,7 @@ export async function handleMessage(
         });
       }
     } else {
-      console.log('[hub] push_subscribe: no pushManager available');
+      console.error('[hub] push_subscribe: no pushManager available');
     }
     return;
   }
@@ -609,7 +618,6 @@ export async function handleMessage(
 
   // Handle API proxy request (Mode 3: browser routes API through hub WS)
   if (message.type === 'api_proxy_request') {
-    console.log(`[hub] api_proxy_request from ${client.remoteAddress}: provider=${(message as any).provider} path=${(message as any).path}`);
     await handleApiProxyRequest(client, message as unknown as ApiProxyRequestMessage, config);
     return;
   }

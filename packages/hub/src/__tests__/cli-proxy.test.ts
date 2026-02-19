@@ -2,8 +2,9 @@
  * Tests for CLI proxy module
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'node:events';
+import { existsSync, unlinkSync } from 'node:fs';
 import type { ServerResponse } from 'node:http';
 import type { ChildProcess } from 'node:child_process';
 import {
@@ -15,8 +16,14 @@ import {
   buildCliArgs,
   handleCliProxy,
   synthesizeSSEFromMessage,
+  streamCliEvents,
+  calculateBudget,
+  writeTempImage,
+  buildSystemPrompt,
+  serializeToolSchemas,
   type CliProxyConfig,
   type CliProxyRequest,
+  type CliToolDef,
 } from '../cli-proxy.js';
 
 class MockProcess extends EventEmitter {
@@ -51,6 +58,7 @@ describe('CLI proxy', () => {
       const text = 'Checking...\n<tool_call>\n{"name": "capabilities", "arguments": {}}\n</tool_call>\n<tool_call>\n{"name": "files", "arguments": {"action": "list"}}\n</tool_call>';
       const { textParts, toolCalls } = parseToolCalls(text);
       expect(textParts).toEqual(['Checking...']);
+      // capabilities {} preserved — different tool name from files
       expect(toolCalls).toHaveLength(2);
       expect(toolCalls[0].name).toBe('capabilities');
       expect(toolCalls[1].name).toBe('files');
@@ -73,10 +81,24 @@ describe('CLI proxy', () => {
     });
 
     it('should handle only tool calls with no surrounding text', () => {
-      const text = '<tool_call>\n{"name": "dom", "arguments": {}}\n</tool_call>';
+      const text = '<tool_call>\n{"name": "dom", "arguments": {"action": "query"}}\n</tool_call>';
       const { textParts, toolCalls } = parseToolCalls(text);
       expect(textParts).toHaveLength(0);
       expect(toolCalls).toHaveLength(1);
+    });
+
+    it('should drop empty-arg tool calls when non-empty ones exist (rehearsal pattern)', () => {
+      const text = 'Let me try.\n<tool_call>\n{"name": "dom", "arguments": {}}\n</tool_call>\n<tool_call>\n{"name": "dom", "arguments": {"action": "modify", "selector": "body"}}\n</tool_call>';
+      const { textParts, toolCalls } = parseToolCalls(text);
+      expect(toolCalls).toHaveLength(1);
+      expect(toolCalls[0].arguments).toEqual({ action: 'modify', selector: 'body' });
+    });
+
+    it('should preserve standalone empty-arg tool calls (e.g. capabilities)', () => {
+      const text = '<tool_call>\n{"name": "capabilities", "arguments": {}}\n</tool_call>';
+      const { textParts, toolCalls } = parseToolCalls(text);
+      expect(toolCalls).toHaveLength(1);
+      expect(toolCalls[0].name).toBe('capabilities');
     });
 
     it('should handle malformed JSON in tool call gracefully', () => {
@@ -86,6 +108,21 @@ describe('CLI proxy', () => {
       // Malformed tool call treated as text
       expect(textParts).toHaveLength(1);
       expect(textParts[0]).toContain('not valid json');
+    });
+
+    it('should handle ES6 Unicode escapes in tool call JSON', () => {
+      const text = '<tool_call>\n{"name": "dom", "arguments": {"html": "Hello \\u{1F389}"}}\n</tool_call>';
+      const { textParts, toolCalls } = parseToolCalls(text);
+      expect(toolCalls).toHaveLength(1);
+      expect(toolCalls[0].name).toBe('dom');
+      expect((toolCalls[0].arguments as Record<string, string>).html).toBe('Hello 🎉');
+    });
+
+    it('should handle multiple ES6 Unicode escapes', () => {
+      const text = '<tool_call>\n{"name": "dom", "arguments": {"html": "\\u{1F600} \\u{2764}"}}\n</tool_call>';
+      const { textParts, toolCalls } = parseToolCalls(text);
+      expect(toolCalls).toHaveLength(1);
+      expect((toolCalls[0].arguments as Record<string, string>).html).toBe('😀 ❤');
     });
 
     it('should strip <tool_result> blocks from text', () => {
@@ -105,7 +142,7 @@ describe('CLI proxy', () => {
     });
 
     it('should strip multiple fake tool_results and discard trailing text', () => {
-      const text = 'Hi\n<tool_call>\n{"name": "a", "arguments": {}}\n</tool_call>\n<tool_result>\nresult1\n</tool_result>\n<tool_call>\n{"name": "b", "arguments": {}}\n</tool_call>\n<tool_result>\nresult2\n</tool_result>\nBye';
+      const text = 'Hi\n<tool_call>\n{"name": "a", "arguments": {"x": 1}}\n</tool_call>\n<tool_result>\nresult1\n</tool_result>\n<tool_call>\n{"name": "b", "arguments": {"y": 2}}\n</tool_call>\n<tool_result>\nresult2\n</tool_result>\nBye';
       const { textParts, toolCalls } = parseToolCalls(text);
       expect(toolCalls).toHaveLength(2);
       // "Bye" is trailing text — discarded
@@ -161,7 +198,7 @@ describe('CLI proxy', () => {
       const message = {
         content: [{
           type: 'text',
-          text: 'Let me check.\n<tool_call>\n{"name": "capabilities", "arguments": {}}\n</tool_call>\n<tool_call>\n{"name": "files", "arguments": {"action":"list"}}\n</tool_call>',
+          text: 'Let me check.\n<tool_call>\n{"name": "capabilities", "arguments": {"probe": "network"}}\n</tool_call>\n<tool_call>\n{"name": "files", "arguments": {"action":"list"}}\n</tool_call>',
         }],
         stop_reason: 'end_turn',
       };
@@ -181,7 +218,7 @@ describe('CLI proxy', () => {
       const message = {
         content: [{
           type: 'text',
-          text: '<tool_call>\n{"name": "a", "arguments": {}}\n</tool_call>\n<tool_call>\n{"name": "b", "arguments": {}}\n</tool_call>',
+          text: '<tool_call>\n{"name": "a", "arguments": {"x": 1}}\n</tool_call>\n<tool_call>\n{"name": "b", "arguments": {"y": 2}}\n</tool_call>',
         }],
       };
       const result = transformMessageContent(message);
@@ -387,11 +424,11 @@ describe('CLI proxy', () => {
       expect(args).toContain('--no-session-persistence');
     });
 
-    it('should not include --include-partial-messages (buffered mode)', () => {
+    it('should include --include-partial-messages', () => {
       const req: CliProxyRequest = { messages: [{ role: 'user', content: 'hi' }] };
       const config: CliProxyConfig = {};
       const args = buildCliArgs(req, config);
-      expect(args).not.toContain('--include-partial-messages');
+      expect(args).toContain('--include-partial-messages');
     });
 
     it('should disable tools with --tools ""', () => {
@@ -404,7 +441,7 @@ describe('CLI proxy', () => {
       expect(args[toolsIdx + 1]).toBe('');
     });
 
-    it('should include system prompt when provided', () => {
+    it('should include system prompt with tool call format instructions', () => {
       const req: CliProxyRequest = {
         system: 'You are a helpful agent.',
         messages: [{ role: 'user', content: 'hi' }],
@@ -414,15 +451,19 @@ describe('CLI proxy', () => {
 
       const sysIdx = args.indexOf('--system-prompt');
       expect(sysIdx).toBeGreaterThan(-1);
-      expect(args[sysIdx + 1]).toBe('You are a helpful agent.');
+      const prompt = args[sysIdx + 1];
+      expect(prompt).toContain('You are a helpful agent.');
+      expect(prompt).toContain('<tool_call>');
     });
 
-    it('should not include system prompt when not provided', () => {
+    it('should include tool call format instructions even without user system prompt', () => {
       const req: CliProxyRequest = { messages: [{ role: 'user', content: 'hi' }] };
       const config: CliProxyConfig = {};
       const args = buildCliArgs(req, config);
 
-      expect(args).not.toContain('--system-prompt');
+      const sysIdx = args.indexOf('--system-prompt');
+      expect(sysIdx).toBeGreaterThan(-1);
+      expect(args[sysIdx + 1]).toContain('<tool_call>');
     });
 
     it('should include extra args from config', () => {
@@ -434,7 +475,7 @@ describe('CLI proxy', () => {
       expect(args).toContain('opus');
     });
 
-    it('should include --max-turns 1 when max_tokens is set', () => {
+    it('should include --max-budget-usd when max_tokens is set', () => {
       const req: CliProxyRequest = {
         messages: [{ role: 'user', content: 'hi' }],
         max_tokens: 4096,
@@ -442,8 +483,345 @@ describe('CLI proxy', () => {
       const config: CliProxyConfig = {};
       const args = buildCliArgs(req, config);
 
-      expect(args).toContain('--max-turns');
-      expect(args[args.indexOf('--max-turns') + 1]).toBe('1');
+      expect(args).toContain('--max-budget-usd');
+      const budgetIdx = args.indexOf('--max-budget-usd');
+      const budgetValue = parseFloat(args[budgetIdx + 1]);
+      expect(budgetValue).toBeGreaterThan(0);
+    });
+
+    it('should include --model when model is provided', () => {
+      const req: CliProxyRequest = {
+        messages: [{ role: 'user', content: 'hi' }],
+        model: 'claude-sonnet-4-5-20250929',
+      };
+      const config: CliProxyConfig = {};
+      const args = buildCliArgs(req, config);
+
+      expect(args).toContain('--model');
+      expect(args).toContain('claude-sonnet-4-5-20250929');
+    });
+
+    it('should not include --model when model is not provided', () => {
+      const req: CliProxyRequest = {
+        messages: [{ role: 'user', content: 'hi' }],
+      };
+      const config: CliProxyConfig = {};
+      const args = buildCliArgs(req, config);
+
+      expect(args).not.toContain('--model');
+    });
+
+    it('should include tool schemas in system prompt when tools provided', () => {
+      const req: CliProxyRequest = {
+        messages: [{ role: 'user', content: 'hi' }],
+        tools: [{
+          name: 'dom',
+          description: 'DOM tool.',
+          input_schema: {
+            type: 'object',
+            properties: { action: { type: 'string', enum: ['create', 'modify'] } },
+            required: ['action'] as const,
+          },
+        }],
+      };
+      const config: CliProxyConfig = {};
+      const args = buildCliArgs(req, config);
+
+      const sysIdx = args.indexOf('--system-prompt');
+      const prompt = args[sysIdx + 1];
+      expect(prompt).toContain('Available tools:');
+      expect(prompt).toContain('dom: DOM tool.');
+      expect(prompt).toContain('[create|modify]');
+    });
+  });
+
+  describe('buildSystemPrompt', () => {
+    it('should append tool call format instructions to user prompt', () => {
+      const result = buildSystemPrompt('You are an agent.');
+      expect(result).toContain('You are an agent.');
+      expect(result).toContain('<tool_call>');
+      expect(result).toContain('tool_name');
+    });
+
+    it('should include format instructions even with no user prompt', () => {
+      const result = buildSystemPrompt();
+      expect(result).toContain('<tool_call>');
+    });
+
+    it('should include instructions not to fabricate tool results', () => {
+      const result = buildSystemPrompt();
+      expect(result).toContain('Do not simulate');
+    });
+
+    it('should include DOM best practices note', () => {
+      const result = buildSystemPrompt();
+      expect(result).toContain('prefer "modify"');
+    });
+
+    it('should include tool schemas when tools provided', () => {
+      const tools = [
+        {
+          name: 'dom',
+          description: 'Manipulate DOM',
+          input_schema: {
+            type: 'object',
+            properties: {
+              action: { type: 'string', enum: ['create', 'modify'], description: 'DOM action' },
+              selector: { type: 'string', description: 'CSS selector' },
+            },
+            required: ['action'] as const,
+          },
+        },
+      ];
+      const result = buildSystemPrompt('You are an agent.', tools);
+      expect(result).toContain('Available tools:');
+      expect(result).toContain('dom: Manipulate DOM');
+      expect(result).toContain('action (string) [create|modify]');
+      expect(result).toContain('selector (string)');
+    });
+
+    it('should not include tool schemas section when no tools', () => {
+      const result = buildSystemPrompt('Prompt');
+      expect(result).not.toContain('Available tools:');
+    });
+  });
+
+  describe('serializeToolSchemas', () => {
+    it('should return empty string for empty tools array', () => {
+      expect(serializeToolSchemas([])).toBe('');
+    });
+
+    it('should return empty string for undefined tools', () => {
+      expect(serializeToolSchemas(undefined as unknown as never[])).toBe('');
+    });
+
+    it('should serialize tool with properties and required fields', () => {
+      const tools = [{
+        name: 'fetch',
+        description: 'Make HTTP requests.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            url: { type: 'string', description: 'URL to fetch' },
+            method: { type: 'string', description: 'HTTP method' },
+          },
+          required: ['url'] as const,
+        },
+      }];
+      const result = serializeToolSchemas(tools);
+      expect(result).toContain('fetch: Make HTTP requests. Required: url.');
+      expect(result).toContain('url (string) - URL to fetch');
+      expect(result).toContain('method (string) - HTTP method');
+    });
+
+    it('should serialize enum values', () => {
+      const tools = [{
+        name: 'storage',
+        description: 'Key-value storage.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            action: { type: 'string', enum: ['get', 'set', 'delete'], description: 'Action' },
+          },
+          required: ['action'] as const,
+        },
+      }];
+      const result = serializeToolSchemas(tools);
+      expect(result).toContain('[get|set|delete]');
+    });
+
+    it('should handle tool with no properties', () => {
+      const tools = [{
+        name: 'simple',
+        description: 'A simple tool.',
+        input_schema: { type: 'object' } as { type: string },
+      }];
+      const result = serializeToolSchemas(tools);
+      expect(result).toContain('simple: A simple tool.');
+    });
+
+    it('should serialize multiple tools', () => {
+      const tools: CliToolDef[] = [
+        {
+          name: 'dom',
+          description: 'DOM tool.',
+          input_schema: {
+            type: 'object',
+            properties: { action: { type: 'string' } },
+            required: ['action'] as const,
+          },
+        },
+        {
+          name: 'fetch',
+          description: 'Fetch tool.',
+          input_schema: {
+            type: 'object',
+            properties: { url: { type: 'string' } },
+            required: ['url'] as const,
+          },
+        },
+      ];
+      const result = serializeToolSchemas(tools);
+      expect(result).toContain('- dom:');
+      expect(result).toContain('- fetch:');
+    });
+  });
+
+  describe('calculateBudget', () => {
+    it('should calculate budget from max_tokens with known model', () => {
+      const budget = calculateBudget(4096, 'claude-sonnet-4-5-20250929');
+      expect(budget).toBeGreaterThan(0);
+    });
+
+    it('should use fallback pricing for unknown model', () => {
+      const budget = calculateBudget(4096, 'unknown-model-xyz');
+      expect(budget).toBeGreaterThan(0);
+      // Fallback: (4096 / 1_000_000) * 15 * 1.5
+      const expected = (4096 / 1_000_000) * 15 * 1.5;
+      expect(budget).toBeCloseTo(expected, 6);
+    });
+
+    it('should cap at $5', () => {
+      const budget = calculateBudget(1_000_000, 'claude-sonnet-4-5-20250929');
+      expect(budget).toBe(5);
+    });
+  });
+
+  describe('writeTempImage', () => {
+    const createdFiles: string[] = [];
+
+    afterEach(() => {
+      for (const f of createdFiles) {
+        try { unlinkSync(f); } catch { /* ignore */ }
+      }
+      createdFiles.length = 0;
+    });
+
+    it('should write base64 data to a temp file', () => {
+      const path = writeTempImage('image/png', Buffer.from('test').toString('base64'));
+      createdFiles.push(path);
+      expect(existsSync(path)).toBe(true);
+      expect(path.endsWith('.png')).toBe(true);
+    });
+
+    it('should convert jpeg media type to jpg extension', () => {
+      const path = writeTempImage('image/jpeg', Buffer.from('test').toString('base64'));
+      createdFiles.push(path);
+      expect(path.endsWith('.jpg')).toBe(true);
+    });
+  });
+
+  describe('streamCliEvents', () => {
+    beforeEach(() => {
+      currentMockProcess = new MockProcess();
+    });
+
+    it('should yield SSE events from buffered CLI output', async () => {
+      const req: CliProxyRequest = {
+        messages: [{ role: 'user', content: 'Hi' }],
+      };
+      const config: CliProxyConfig = {};
+
+      const gen = streamCliEvents(req, config);
+
+      const assistantLine = JSON.stringify({
+        type: 'assistant',
+        message: { id: 'msg_1', content: [{ type: 'text', text: 'Hello!' }], stop_reason: 'end_turn' },
+      });
+
+      setTimeout(() => {
+        currentMockProcess.stdout.emit('data', Buffer.from(assistantLine + '\n'));
+        currentMockProcess.emit('close', 0);
+      }, 10);
+
+      const chunks: string[] = [];
+      for await (const chunk of gen) {
+        chunks.push(chunk);
+      }
+
+      // message_start + block_start + block_delta + block_stop + message_delta + message_stop = 6
+      expect(chunks.length).toBe(6);
+      expect(chunks[0]).toContain('event: message_start');
+      expect(chunks[5]).toContain('event: message_stop');
+    });
+
+    it('should throw on process timeout', async () => {
+      const req: CliProxyRequest = {
+        messages: [{ role: 'user', content: 'Hi' }],
+      };
+      const config: CliProxyConfig = { timeout: 50 };
+
+      // Capture in local variable to avoid closure over module-level currentMockProcess,
+      // which would emit 'close' on the NEXT test's mock if the setTimeout fires late.
+      const proc = currentMockProcess;
+      proc.kill.mockImplementation(() => {
+        setTimeout(() => proc.emit('close', null), 0);
+      });
+
+      const gen = streamCliEvents(req, config);
+
+      await expect(async () => {
+        for await (const _chunk of gen) {
+          // should not yield anything before timeout
+        }
+      }).rejects.toThrow(/timeout/i);
+    });
+
+    it('should throw on process error', async () => {
+      const req: CliProxyRequest = {
+        messages: [{ role: 'user', content: 'Hi' }],
+      };
+      const config: CliProxyConfig = {};
+
+      const gen = streamCliEvents(req, config);
+
+      setTimeout(() => {
+        currentMockProcess.emit('error', new Error('spawn ENOENT'));
+        // Node.js emits 'close' after 'error' in real child processes
+        currentMockProcess.emit('close', 1);
+      }, 10);
+
+      let caught: Error | undefined;
+      try {
+        for await (const _chunk of gen) {
+          // should not yield anything
+        }
+      } catch (err) {
+        caught = err as Error;
+      }
+
+      expect(caught).toBeDefined();
+      expect(caught!.message).toMatch(/spawn ENOENT/);
+    });
+
+    it('should skip system and result lines', async () => {
+      const req: CliProxyRequest = {
+        messages: [{ role: 'user', content: 'Hi' }],
+      };
+      const config: CliProxyConfig = {};
+
+      const gen = streamCliEvents(req, config);
+
+      const systemLine = JSON.stringify({ type: 'system', subtype: 'init', tools: [] });
+      const assistantLine = JSON.stringify({
+        type: 'assistant',
+        message: { id: 'msg_1', content: [{ type: 'text', text: 'Hi!' }], stop_reason: 'end_turn' },
+      });
+      const resultLine = JSON.stringify({ type: 'result', subtype: 'success', is_error: false });
+
+      setTimeout(() => {
+        currentMockProcess.stdout.emit('data', Buffer.from(systemLine + '\n' + assistantLine + '\n' + resultLine + '\n'));
+        currentMockProcess.emit('close', 0);
+      }, 10);
+
+      const chunks: string[] = [];
+      for await (const chunk of gen) {
+        chunks.push(chunk);
+      }
+
+      // Only the assistant line should produce events (6)
+      expect(chunks.length).toBe(6);
+      expect(chunks[0]).toContain('event: message_start');
     });
   });
 

@@ -9,16 +9,10 @@ import { calculateCost } from './cost-utils.js';
 import { resolveModelId } from './model-aliases.js';
 
 // Model pricing (per million tokens)
+// Order matters — UI model selectors display models in insertion order.
+// Sonnet is the recommended default, so it goes first.
 const MODEL_INFO: Record<string, ModelInfo> = {
   // Claude 4.6 series (current generation)
-  'claude-opus-4-6': {
-    id: 'claude-opus-4-6',
-    displayName: 'Claude Opus 4.6',
-    provider: 'anthropic',
-    contextWindow: 200000,
-    maxOutputTokens: 131072,
-    pricing: { inputPerMillion: 5.0, outputPerMillion: 25.0, cacheCreationPerMillion: 6.25, cacheReadPerMillion: 0.5 },
-  },
   'claude-sonnet-4-6': {
     id: 'claude-sonnet-4-6',
     displayName: 'Claude Sonnet 4.6',
@@ -26,6 +20,14 @@ const MODEL_INFO: Record<string, ModelInfo> = {
     contextWindow: 200000,
     maxOutputTokens: 65536,
     pricing: { inputPerMillion: 3.0, outputPerMillion: 15.0, cacheCreationPerMillion: 3.75, cacheReadPerMillion: 0.3 },
+  },
+  'claude-opus-4-6': {
+    id: 'claude-opus-4-6',
+    displayName: 'Claude Opus 4.6',
+    provider: 'anthropic',
+    contextWindow: 200000,
+    maxOutputTokens: 131072,
+    pricing: { inputPerMillion: 5.0, outputPerMillion: 25.0, cacheCreationPerMillion: 6.25, cacheReadPerMillion: 0.5 },
   },
   // Claude 4.5 series
   'claude-opus-4-5-20251101': {

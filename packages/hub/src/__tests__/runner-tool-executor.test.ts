@@ -189,6 +189,76 @@ describe('runner-tool-executor', () => {
       );
     });
 
+    it('routes runjs context:"iframe" to browser even when hub stores available', async () => {
+      const mockRouter = {
+        routeToBrowser: vi.fn().mockResolvedValue({ content: 'iframe result' }),
+        isAvailable: vi.fn().mockReturnValue(true),
+        handleResult: vi.fn(),
+        pendingCount: 0,
+      };
+
+      const executor = createToolExecutor({
+        hubConfig: getDefaultConfig(),
+        browserToolRouter: mockRouter as any,
+        hubAgentId: 'hub-agent-1',
+        stateStore: new HubAgentStateStore(),
+        storageStore: new HubAgentStorageStore(),
+      });
+
+      const result = await executor('runjs', { code: 'document.body.style.color = "red"', context: 'iframe' });
+      expect(result.content).toBe('iframe result');
+      expect(mockRouter.routeToBrowser).toHaveBeenCalledWith(
+        'hub-agent-1',
+        'runjs',
+        { code: 'document.body.style.color = "red"', context: 'iframe' },
+      );
+    });
+
+    it('routes runjs context:"iframe" to hub when no browser available', async () => {
+      const mockRouter = {
+        routeToBrowser: vi.fn(),
+        isAvailable: vi.fn().mockReturnValue(false),
+        handleResult: vi.fn(),
+        pendingCount: 0,
+      };
+
+      const executor = createToolExecutor({
+        hubConfig: getDefaultConfig(),
+        browserToolRouter: mockRouter as any,
+        hubAgentId: 'hub-agent-1',
+        stateStore: new HubAgentStateStore(),
+        storageStore: new HubAgentStorageStore(),
+      });
+
+      const result = await executor('runjs', { code: 'document.body.style.color = "red"', context: 'iframe' });
+      // Falls through to hub execution (not browser routing)
+      expect(mockRouter.routeToBrowser).not.toHaveBeenCalled();
+      // Won't be the "browser-only tool" error — hub handles it
+      expect(result.content).not.toContain('browser-only tool');
+    });
+
+    it('routes runjs context:"worker" to hub even when browser available', async () => {
+      const mockRouter = {
+        routeToBrowser: vi.fn().mockResolvedValue({ content: 'browser result' }),
+        isAvailable: vi.fn().mockReturnValue(true),
+        handleResult: vi.fn(),
+        pendingCount: 0,
+      };
+
+      const executor = createToolExecutor({
+        hubConfig: getDefaultConfig(),
+        browserToolRouter: mockRouter as any,
+        hubAgentId: 'hub-agent-1',
+        stateStore: new HubAgentStateStore(),
+        storageStore: new HubAgentStorageStore(),
+      });
+
+      const result = await executor('runjs', { code: '1 + 1', context: 'worker' });
+      // context:"worker" should NOT route to browser — hub handles it
+      expect(mockRouter.routeToBrowser).not.toHaveBeenCalled();
+      expect(result.content).not.toContain('browser-only tool');
+    });
+
     it('capabilities tool returns hub capabilities when agentConfig provided', async () => {
       const mockConfig: AgentConfig = {
         id: 'test-agent',

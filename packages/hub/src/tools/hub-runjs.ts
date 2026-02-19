@@ -259,9 +259,10 @@ export async function executeHubRunJs(
 ): Promise<ToolResult> {
   const startTime = Date.now();
 
-  // Silently ignore iframe context on hub — always run as worker.
-  // Agents (or scheduled tasks) may specify context: "iframe" from browser habits;
-  // rejecting would break scheduled tool calls that have this baked in.
+  // Fallback: if context:"iframe" reaches hub execution (no browser connected, or
+  // scheduled task with baked-in context), run as worker instead of failing.
+  // The router in runner-tool-executor.ts prefers routing context:"iframe" to the
+  // browser when one is available.
   if (input.context === 'iframe') {
     input = { ...input, context: 'worker' };
   }

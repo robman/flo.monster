@@ -120,6 +120,12 @@ describe('iframe-template', () => {
       expect(script).toContain("case 'set_view_state':");
       expect(script).toContain('currentViewState = data.state');
     });
+
+    it('removePlaceholder removes default head style to avoid selector conflicts', () => {
+      const script = generateBootstrapScript('test');
+      expect(script).toContain("document.querySelector('style[data-flo-default]')");
+      expect(script).toContain('defaultStyle.remove()');
+    });
   });
 
   describe('generateIframeSrcdoc', () => {
@@ -157,6 +163,11 @@ describe('iframe-template', () => {
       const srcdoc = generateIframeSrcdoc('agent-1', 'My Agent');
       expect(srcdoc).toContain('My Agent');
       expect(srcdoc).toContain('Awaiting instructions');
+    });
+
+    it('marks default head style with data-flo-default attribute', () => {
+      const srcdoc = generateIframeSrcdoc('agent-1', 'Test');
+      expect(srcdoc).toContain('<style data-flo-default>');
     });
   });
 
