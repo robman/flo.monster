@@ -49,7 +49,7 @@ export const scheduleToolDef: ToolDef = {
       },
       condition: {
         type: 'string',
-        description: 'Condition for event triggers. Examples: "> 100", "< 5", "== done", "changed", "always", or JS expression',
+        description: 'Condition for event triggers. Examples: "> 100", ">= 50", "< 5", "<= 10", "== done", "!= failed", "changed", "always"',
       },
       message: {
         type: 'string',
@@ -93,6 +93,9 @@ export function executeScheduleTool(
         if (input.message && input.tool) {
           return { content: 'Cannot specify both message and tool — use one or the other', is_error: true };
         }
+        if (input.tool && !input.toolInput) {
+          return { content: `toolInput is required when tool is specified — provide the tool's input parameters as a JSON object. For example: tool: "runjs", toolInput: { "code": "your code here" }`, is_error: true };
+        }
 
         const id = scheduler.addSchedule({
           hubAgentId,
@@ -106,17 +109,21 @@ export function executeScheduleTool(
           maxRuns: input.maxRuns,
         });
 
-        return {
-          content: JSON.stringify({
-            success: true,
-            id,
-            type: input.type,
-            ...(input.cron ? { cron: input.cron } : {}),
-            ...(input.event ? { event: input.event } : {}),
-            ...(input.tool ? { tool: input.tool } : {}),
-            ...(input.maxRuns !== undefined ? { maxRuns: input.maxRuns } : {}),
-          }),
+        const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+        const response: Record<string, unknown> = {
+          success: true,
+          id,
+          type: input.type,
+          ...(input.cron ? { cron: input.cron } : {}),
+          ...(input.event ? { event: input.event } : {}),
+          ...(input.tool ? { tool: input.tool } : {}),
+          ...(input.maxRuns !== undefined ? { maxRuns: input.maxRuns } : {}),
+          timezone: tz,
         };
+        if (input.cron) {
+          response.note = `Cron will run in the server's local timezone (${tz}). Verify the cron expression matches the user's intended time in this timezone.`;
+        }
+        return { content: JSON.stringify(response) };
       }
 
       case 'remove': {

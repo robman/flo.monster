@@ -8,132 +8,6 @@ import type { StoredSkill } from '../types/skills.js';
  * on-demand reference material, keeping the base system prompt slim.
  */
 
-const floCookbook: StoredSkill = {
-  name: 'flo-cookbook',
-  manifest: {
-    name: 'flo-cookbook',
-    description: 'Core patterns and API reference: DOM best practices, flo API (callTool, state, notify/ask, media), architect pattern, event handling, persistent memory, error handling, performance tips, anti-patterns',
-    category: 'system',
-    userInvocable: false,
-  },
-  instructions: `# flo Cookbook — Core Patterns & API Reference
-
-## DOM Best Practices
-
-- Design your page to fit the viewport — use flexbox/grid, vh/vw units, avoid fixed pixel heights that cause overflow. Only use scrolling layouts when content genuinely requires it. Hub agents may be viewed from multiple browsers with different screen sizes simultaneously — always use responsive CSS rather than hard-coding dimensions from a single capabilities snapshot.
-- On mobile, only \`ui-only\` and \`chat-only\` view states are available (\`max\` is desktop only). Default is \`chat-only\` — user sees only chat, your DOM is hidden. Switch to \`ui-only\` when your page is the primary experience. In \`ui-only\` the user CANNOT see the chat panel — communicate through your page, not text responses.
-- Prefer inline handlers: \`<button onclick="handleClick()">Click</button>\`
-- Include \`<script>\` tags with your HTML to define functions and setup listeners — avoids separate runjs calls and makes your page interactive immediately. Scripts in \`dom create\` auto-execute; do NOT use \`runjs\` to verify or re-inject them.
-- Do NOT use \`dom modify\` to update a \`<script>\` tag's innerHTML — browsers don't re-execute modified scripts. Rebuild the containing element or use runjs.
-- Use \`var\` (not const/let) for top-level variables, or assign to \`window\` (e.g., \`window.state = {}\`). This allows scripts to re-run without "already declared" errors.
-- \`alert()\`, \`confirm()\`, \`prompt()\` are NOT available (sandboxed). Use \`flo.notify()\`/\`flo.ask()\` or build DOM UI instead.
-- DOM responses include rendered dimensions and visibility info. Check for 0x0 or NOT VISIBLE to verify layouts. Note: \`dom create\` reports rendered info for the created wrapper, not the full page — a 0x0 result is normal for style elements.
-- Runtime errors, console.error() calls, and resource load failures are automatically batched and reported. To be notified of caught errors, re-throw: \`catch (e) { /* cleanup */ throw e; }\`
-
-## runjs Tips
-
-- \`runjs\` wraps your code in a function body — use \`return\` to get values back (e.g., \`return document.title\`). Bare expressions return \`undefined\`.
-- Default execution context is the Web Worker. To run code in the page iframe, pass \`context: 'iframe'\`.
-- Prefer inline \`<script>\` tags in \`dom create\` over separate \`runjs\` calls — it's simpler and avoids wasted tool calls. Reserve \`runjs\` for one-off debugging or late-binding logic.
-
-## flo API Reference
-
-Available globally in page JavaScript (\`<script>\` tags):
-
-### Communication
-- \`flo.notify(event, data)\` — Fire-and-forget event to the agent
-- \`flo.ask(event, data)\` — Request-response from the agent (returns Promise)
-
-### Tool Access
-- \`flo.callTool(name, input, options)\` — Call tools from page JS. Returns a Promise. Returns native JS values (objects, arrays, strings), not raw JSON. Options: \`{ timeout: ms }\` (default 30s).
-
-Security tiers:
-- Immediate: storage, files, view_state, subagent, capabilities, agent_respond, worker_message
-- Approval required: fetch, web_fetch, web_search
-- Blocked: Hub tools (bash, etc.)
-
-Storage examples:
-\`\`\`js
-await flo.callTool('storage', { action: 'set', key: 'items', value: [1, 2, 3] })  // { ok: true }
-var items = await flo.callTool('storage', { action: 'get', key: 'items' })         // [1, 2, 3]
-var keys = await flo.callTool('storage', { action: 'list' })                       // ['items', ...]
-await flo.callTool('storage', { action: 'delete', key: 'items' })                  // { ok: true }
-\`\`\`
-
-Files examples:
-\`\`\`js
-await flo.callTool('files', { action: 'write_file', path: 'out.txt', content: text })
-var content = await flo.callTool('files', { action: 'read_file', path: 'out.txt' })
-\`\`\`
-
-IMPORTANT: flo.callTool() is async — always use it in async functions with await.
-
-### Reactive State
-- \`flo.state.get(key)\` — Synchronous read from cache (undefined if not set)
-- \`flo.state.set(key, value)\` — Update state, fire onChange, check escalation, persist
-- \`flo.state.getAll()\` — Shallow copy of all state
-- \`flo.state.onChange(keyOrPattern, callback)\` — Register handler. Pattern \`'player.*'\` matches keys starting with \`'player.'\`. Callback: \`(newValue, oldValue, key)\`. Returns unsubscribe fn.
-- \`flo.state.escalate(key, condition, message)\` — Register escalation rule. Condition: \`true\`/\`'always'\`/function/JS-expression-string. Triggers state_escalation event.
-- \`flo.state.clearEscalation(key)\` — Remove escalation rule.
-
-### Permissions & Media
-- \`flo.requestPermission(type)\` — Request browser permissions (must be enabled in agent settings first)
-- \`flo.getCamera()\` — Camera MediaStream (video only). Shell captures, proxies via WebRTC.
-- \`flo.getMicrophone()\` — Microphone MediaStream (audio only).
-- \`flo.getMediaStream({ video: true, audio: true })\` — Combined MediaStream.
-- \`flo.stopMediaStream(stream)\` — Stop stream and release devices.
-- \`flo.geolocation.getCurrentPosition(options?)\` — One-shot position. Shell proxies via postMessage. Returns Promise.
-- \`flo.geolocation.watchPosition(onposition, onerror?, options?)\` — Continuous tracking. Returns session with \`.stop()\`.
-
-Video elements MUST have both \`playsinline\` and \`autoplay\` attributes for iOS compatibility.
-
-## Architect Pattern
-
-For interactive apps (games, dashboards, forms), prefer being an architect over a micromanager:
-
-1. Use the state tool to set initial state and escalation rules. IMPORTANT: state values are native JSON — use \`value: []\` for empty array, not \`value: "[]"\`.
-2. Build your page with \`<script>\` tags that use \`flo.state.get/set/onChange\` for all interactions.
-3. Finish processing — page JS handles user interactions autonomously without API calls.
-4. Wake only when escalation conditions fire (e.g., game over, score threshold, error state).
-
-This dramatically reduces token cost and latency. State escalations arrive as "Event: state_escalation" notifications with \`{key, value, message, snapshot}\`.
-
-## Event Handling
-
-You are NOT automatically notified of viewport changes, resize events, or other browser events. This is by design — waking you for every resize wastes tokens.
-
-- Use \`dom listen\` to subscribe to DOM events on specific elements (clicks, input changes, etc.)
-- For viewport/resize: add a resize handler in page JS that updates flo.state, then use \`flo.state.escalate()\` to wake you only when meaningful thresholds are crossed.
-- You always get viewport info in \`capabilities\` responses and DOM tool responses (rendered info).
-
-In general, prefer the escalation pattern: page JS monitors events and writes to flo.state; escalation rules wake you only when action is needed.
-
-## Persistent Memory
-
-Your files persist across sessions — use them as memory. At the start of each session, check for existing files to resume context. Maintain files like:
-- \`memory.md\` — User preferences, project state, decisions, what worked/failed
-- \`plan.md\` — Current goals, progress, next steps
-- \`notes.md\` — Working notes, research, ideas
-
-Use context_search to look up past conversation details:
-- \`context_search({ mode: 'search', query: '...', before: 3, after: 3 })\` — find past discussions
-- \`context_search({ mode: 'tail', last: 20 })\` — recent conversation history
-- \`context_search({ mode: 'head', first: 10 })\` — beginning of conversation
-- \`context_search({ mode: 'turn', turnId: 't5' })\` — retrieve full messages for a specific turn (turn IDs shown in activity log)
-- \`context_search({ mode: 'turn', turnId: 't5', before: 1, after: 1 })\` — include surrounding turns
-
-## Anti-Patterns
-
-- Don't create large monolithic HTML — break into components updated via dom modify
-- Don't use runjs for every interaction — embed logic in \`<script>\` tags
-- Don't use runjs to verify \`dom create\` scripts ran — they always auto-execute. Build the complete page in one \`dom create\`, then finish processing.
-- Don't poll for user input — use event listeners and flo.state.onChange
-- Don't wake the agent for trivial events — use escalation for meaningful state changes only
-- Don't store state in JS variables alone — use flo.state for persistence across sessions`,
-  source: { type: 'builtin' },
-  installedAt: 0,
-};
-
 const floSrcdoc: StoredSkill = {
   name: 'flo-srcdoc',
   manifest: {
@@ -142,54 +16,68 @@ const floSrcdoc: StoredSkill = {
     category: 'system',
     userInvocable: false,
   },
-  instructions: `# flo Srcdoc — UI Snapshots & Multi-Skin Management
+  instructions: `# flo Srcdoc — Skins & Page Persistence
 
-## Saving UI Snapshots
+Skins are your page's version control — your DOM is ephemeral without explicit saves. A skin is a snapshot of your page HTML saved as a \`.srcdoc\` file. Without skins, everything you build disappears when the session ends.
 
-Save your page as a reusable skin (UI snapshot):
+> **Unlearn**: Skins do NOT carry \`flo.state\`. Your page JS depends on state values, but the skin only captures HTML. You must save and restore state separately — load state before or immediately after loading a skin, or your page will render without its data.
 
-1. **HTML file**: Save as \`$name.srcdoc\` — the full HTML of your page
-2. **Metadata file**: Save as \`$name.srcdoc.md\` with YAML frontmatter:
-\`\`\`markdown
----
-title: Calculator
-description: Scientific calculator with graphing
----
-Optional notes about this skin.
+## Execution Mode
+
+- **Browser modes and hub-with-browser**: Full functionality. \`files\` tool reads/writes skins, \`dom create\` loads them with full script execution.
+- **Hub-only**: \`files\` tool works (read/write skins). \`dom create\` works structurally via JSDOM, but scripts do NOT execute until a browser connects. No rendering (0x0 dimensions). No events. Skins saved in hub-only mode are structural snapshots that come alive when a browser arrives.
+
+## Size Limits
+
+1MB per file, 10MB total per agent. Keep skins lean — avoid inlining large base64 assets.
+
+## Saving a Skin
+
+Always create both files — the \`.srcdoc\` with your HTML, and the \`.srcdoc.md\` with metadata so you (and the user) can identify skins later without reading their full content.
+
+\`\`\`
+// 1. Capture current page HTML
+dom({ action: 'query', selector: 'html', attribute: 'outerHTML' })
+
+// 2. Save the HTML as a skin file
+files({ action: 'write_file', path: 'calculator.srcdoc', content: '<captured html>' })
+
+// 3. Save metadata with frontmatter
+files({ action: 'write_file', path: 'calculator.srcdoc.md', content: '---\\ntitle: Calculator\\ndescription: Scientific calculator with graphing\\n---\\nNotes about this skin.' })
 \`\`\`
 
 ## Listing Available Skins
 
-Use the files tool with frontmatter action to discover saved UIs:
+The frontmatter action reads YAML headers from matching files, giving you a menu without loading full skin content:
+
 \`\`\`
 files({ action: 'frontmatter', pattern: '*.srcdoc.md' })
+// Returns: [{ path: 'calculator.srcdoc.md', title: 'Calculator', description: '...' }, ...]
 \`\`\`
-
-This returns the YAML frontmatter from all matching files, letting you present a menu of available skins.
 
 ## Loading a Skin
 
-Read the \`.srcdoc\` file and set it as your page content:
+Read the \`.srcdoc\` file, then replace your page with its content:
+
 \`\`\`
 files({ action: 'read_file', path: 'calculator.srcdoc' })
 dom({ action: 'create', html: '<content from file>' })
 \`\`\`
 
+This replaces your entire page. Any existing DOM is destroyed. Scripts in the skin execute on load.
+
+## Session Resumption
+
+When starting a new session, check for existing skins before building from scratch:
+
+1. **Check for skins**: \`files({ action: 'frontmatter', pattern: '*.srcdoc.md' })\`
+2. **If skins exist**: List them for the user, or load the most appropriate one
+3. **Load the skin**: Read the \`.srcdoc\` file, then \`dom create\` with its content
+4. **Restore state**: Read saved state from storage or files and apply it — the skin's page JS needs its data
+
 ## Multi-Skin Management
 
-Agents can maintain multiple skins for different purposes:
-- \`dashboard.srcdoc\` / \`dashboard.srcdoc.md\` — main dashboard view
-- \`settings.srcdoc\` / \`settings.srcdoc.md\` — settings panel
-- \`game.srcdoc\` / \`game.srcdoc.md\` — game interface
-
-Switch between skins by reading and loading the appropriate \`.srcdoc\` file. The user can request specific skins by name.
-
-## Best Practices
-
-- Always create both \`.srcdoc\` and \`.srcdoc.md\` files
-- Include meaningful title and description in frontmatter
-- Save skins after significant UI milestones
-- Check for existing skins at session start to offer resumption`,
+An agent can maintain multiple skins for different views — a dashboard, a settings panel, a game board. Each is a pair of files (\`.srcdoc\` + \`.srcdoc.md\`). Switch between them by reading and loading the appropriate skin. The user can request specific skins by name.`,
   source: { type: 'builtin' },
   installedAt: 0,
 };
@@ -202,57 +90,70 @@ const floSubagent: StoredSkill = {
     category: 'system',
     userInvocable: false,
   },
-  instructions: `# flo Subagent — Worker Agents & Delegation
+  instructions: `# flo Subagent — Lightweight Worker Delegation
 
-## Subagent Tool
+Subagents are lightweight workers that run with isolated, minimal conversation context (~200 tokens vs thousands for the parent). The fundamental tradeoff: subagents are cheap but context-limited; the parent is expensive but has full history. Cost savings come from context size — every API call is priced by input tokens, so a subagent doing a quick task costs a fraction of waking the parent.
 
-Spawn lightweight worker agents for delegated tasks:
+> **Unlearn**: Subagents are NOT separate processes or sandboxes. They share your DOM and tools. Think of them as cheap, forgetful copies of yourself that can do focused work without dragging along your entire conversation history.
+
+## Execution Mode
+
+**CRITICAL**: Subagents currently require a browser execution context — they spawn as web workers in the parent's iframe. They are NOT implemented on the hub. In \`hub-only\` and \`hub-with-browser\` modes, calling \`subagent()\` will error.
+
+## Parameters
+
 \`\`\`
-subagent({ task: 'Analyze this data and return a summary', context: 'optional additional context' })
+subagent({
+  task: 'Analyze the data and return a summary',           // required
+  systemPrompt: 'You are a data analyst. Be concise.',     // optional: override system prompt
+  maxTokensPerSubagent: 50000,                             // optional: token budget ceiling
+  maxCostPerSubagent: 0.05                                 // optional: USD cost ceiling
+})
 \`\`\`
 
-Subagents:
-- Have minimal context (~200 tokens vs 2000+ for full conversation)
-- Can use all the same tools (dom, storage, files, state, etc.)
-- Return a text result when complete
-- Have a default 5-minute timeout
+- \`task\` (required): The task description. Phrase it to elicit a text summary in the response.
+- \`systemPrompt\` (optional): Override the subagent's system prompt instead of inheriting the parent's. Useful for creating specialized workers.
+- \`maxTokensPerSubagent\` (optional): Token budget ceiling for cost control.
+- \`maxCostPerSubagent\` (optional): USD cost ceiling for cost control.
 
 ## Calling from Page JavaScript
 
-Use flo.callTool to spawn subagents directly from your page scripts:
 \`\`\`js
 var result = await flo.callTool('subagent', {
-  task: 'Generate a color palette for a nature theme',
+  task: 'Generate a color palette for a nature theme'
 }, { timeout: 300000 });
-// result is the subagent's text response
+// result is the subagent's last assistant text message
 \`\`\`
 
-## Architect-Workers Pattern
+## Shared DOM
 
-Extend the architect pattern with lightweight subagents:
+Subagents share the parent's DOM. They can create, modify, or remove elements on your page. This means multiple concurrent subagents could conflict on DOM updates. Coordinate by assigning each subagent a specific DOM region, or use \`flo.state\` as the coordination layer rather than direct DOM manipulation.
 
-1. Build your page with \`<script>\` tags, set up flo.state, finish processing
-2. Page JS calls \`flo.callTool('subagent', { task: '...' }, { timeout: 300000 })\` for routine work
-3. Subagents read/write flo.state via the state tool, return text results
-4. Main agent wakes only on escalation — subagents handle routine work
+## Return Value
 
-Benefits:
-- Each subagent has minimal context → much cheaper per call
-- Main agent stays inactive → no token cost for routine operations
-- Subagents can run concurrently from different page interactions
-- State changes from subagents trigger the same escalation rules
+The result is the subagent's last assistant text message. If the subagent only uses tool calls without producing text, the result is \`"(Subagent completed but produced no text response)"\`. Phrase your \`task\` to elicit a text summary — e.g., "...and summarize what you did" — so you get a useful return value.
 
 ## Depth Limits
 
-- Subagents cannot spawn their own subagents (depth limit = 1)
-- This prevents runaway recursive spawning
-- If a subagent needs complex multi-step work, it should return instructions for the parent
+Subagents CAN spawn their own subagents. MAX_DEPTH = 3, meaning: root agent (depth 0) can spawn a subagent (depth 1), which can spawn a sub-subagent (depth 2) — all less than the limit of 3. This prevents unbounded recursive spawning while allowing one level of sub-delegation.
 
-## Cost Optimization
+## Error Handling
 
-- Subagent calls cost ~10-20x less than waking the main agent
-- Use subagents for: data processing, content generation, calculations, API calls
-- Keep the main agent for: page architecture, complex state management, user-facing decisions`,
+Subagent calls can fail. When called from page JS, wrap in try/catch:
+
+\`\`\`js
+try {
+  var result = await flo.callTool('subagent', { task: '...' }, { timeout: 300000 });
+} catch (e) {
+  // e.message will be one of:
+  // "Error: Subagent timed out after 5 minutes"
+  // "Error: maximum subagent depth of 3 reached"
+  // "Error: parent agent not found"
+  // "Subagent encountered an error"
+}
+\`\`\`
+
+Default timeout is 5 minutes (300000ms). Concurrent subagents use last-write-wins for state — there are no transactional semantics.`,
   source: { type: 'builtin' },
   installedAt: 0,
 };
@@ -267,112 +168,88 @@ const floSpeech: StoredSkill = {
   },
   instructions: `# flo Speech — Voice Input & Output
 
+Do NOT use \`SpeechRecognition\` or \`speechSynthesis\` — they are blocked in the sandbox. \`flo.speech\` proxies through the shell via postMessage. The shell runs the native browser speech APIs on your behalf and relays results back.
+
+## Execution Mode
+
+These APIs require a browser connection (\`browser-only\`, \`browser-with-hub\`, \`hub-with-browser\`). In \`hub-only\` mode, they do not exist — there is no browser, no iframe, no shell relay. \`flo.speech\` is not available at all.
+
+## Conceptual Model
+
+**STT** is session-based: \`listen()\` returns a session object immediately (not a Promise). The session captures speech continuously until you call \`done()\` or \`cancel()\`. **TTS** is fire-and-forget: \`speak()\` returns a Promise that resolves when the utterance finishes.
+
+## Permission Flow
+
+Microphone permission is required for STT. Two stages: (1) agent approval dialog (Deny / Allow Once / Allow Always), then (2) browser native microphone prompt. If either is denied, the API fails. \`flo.requestPermission('microphone')\` can request permission proactively — it **throws** if agent-level approval is denied, returns \`true\`/\`false\` for the browser grant.
+
 ## Speech-to-Text (STT)
 
-\`flo.speech.listen()\` returns a **session object** (not a Promise). The session captures speech continuously until you call \`done()\` or \`cancel()\`.
-
 \`\`\`js
-// Start listening — returns session object immediately
 var session = flo.speech.listen({
   lang: 'en-US',                          // optional, defaults to en-US
-  oninterim: function(text) {             // optional, called with partial transcript
+  oninterim: function(text) {             // called with partial transcript
     document.getElementById('preview').textContent = text;
   }
 });
 
-// User clicks "Done" — finalize and get result
+// Finalize — returns Promise<{ text, confidence } | null>
 session.done().then(function(result) {
-  // result = { text: 'final transcript', confidence: 0.95 }
-  // result is null if cancelled
-  console.log(result.text);
+  if (result) console.log(result.text);
 });
 
-// User clicks "Cancel" — discard
+// Or discard
 session.cancel();
 \`\`\`
 
-### Complete voice note example:
-\`\`\`html
-<button id="recordBtn" onclick="toggleRecording()">Press to Talk</button>
-<div id="transcript"></div>
-<button id="doneBtn" onclick="finishRecording()" style="display:none">Done</button>
-<button id="cancelBtn" onclick="cancelRecording()" style="display:none">Cancel</button>
-
-<script>
-var currentSession = null;
-
-function toggleRecording() {
-  if (currentSession) return;
-  document.getElementById('recordBtn').textContent = 'Listening...';
-  document.getElementById('doneBtn').style.display = '';
-  document.getElementById('cancelBtn').style.display = '';
-
-  currentSession = flo.speech.listen({
-    oninterim: function(text) {
-      document.getElementById('transcript').textContent = text;
-    }
-  });
-}
-
-function finishRecording() {
-  if (!currentSession) return;
-  currentSession.done().then(function(result) {
-    if (result) {
-      document.getElementById('transcript').textContent = result.text;
-      // Save the note...
-    }
-    resetUI();
-  });
-}
-
-function cancelRecording() {
-  if (!currentSession) return;
-  currentSession.cancel();
-  resetUI();
-}
-
-function resetUI() {
-  currentSession = null;
-  document.getElementById('recordBtn').textContent = 'Press to Talk';
-  document.getElementById('doneBtn').style.display = 'none';
-  document.getElementById('cancelBtn').style.display = 'none';
-}
-</script>
-\`\`\`
+> **done() interim fallback:** If the browser has not finalized the transcript when \`done()\` is called, it falls back to the last interim text. So \`done()\` almost always returns something if the user was speaking.
 
 ## Text-to-Speech (TTS)
 
 \`\`\`js
-// Speak text (returns Promise, resolves when done)
 await flo.speech.speak('Hello!');
-
-// With options
-await flo.speech.speak('Bonjour', {
-  lang: 'fr-FR',
-  voice: 'Thomas'   // specific voice name from voices()
-});
+await flo.speech.speak('Bonjour', { lang: 'fr-FR', voice: 'Thomas' });
 \`\`\`
 
 ## Available Voices
 
 \`\`\`js
-// Returns Promise<Array<{ name, lang, local }>>
+// Returns Promise<Array<{ name, lang, local }>> — 10s timeout
 var voices = await flo.speech.voices();
 \`\`\`
 
-## Platform Notes
+## Error Handling
 
-- **iOS Safari**: SpeechRecognition auto-stops after ~60s of silence — the runtime auto-restarts
-- **iOS Safari**: TTS requires cancel() before speak() and keepalive — handled by the runtime
-- **Sandboxed iframes**: Speech APIs are proxied through the shell via postMessage — works transparently
-- **Microphone permission**: Requires user gesture and permission grant (agent settings must enable microphone)
+STT errors:
+\`\`\`js
+session.done().catch(function(err) {
+  // "Microphone permission was denied by the user."
+  // "SpeechRecognition not supported"
+  // "network" / "audio-capture" / "not-allowed" (browser errors)
+});
+\`\`\`
 
-## Best Practices
+TTS errors:
+\`\`\`js
+try {
+  await flo.speech.speak('Hello');
+} catch (err) {
+  // "SpeechSynthesis not supported"
+  // "Speech synthesis timed out" (60s timeout)
+}
+\`\`\`
 
-- Use \`oninterim\` callback for real-time visual feedback while recording
-- Let the user control when to finalize (\`done()\`) vs discard (\`cancel()\`)
-- Build the complete UI with \`<script>\` tags in a single \`dom create\` — don't use separate runjs calls
-- Always handle the case where \`done()\` returns null (cancelled) or empty text`,
+## Timeouts
+
+- \`speak()\`: 60 seconds
+- \`voices()\`: 10 seconds
+- \`listen()\`: No timeout — runs until \`done()\` or \`cancel()\`
+- \`done()\`: 500ms internal wait for browser finalization, then falls back to interim text
+
+## Platform Gotchas
+
+- **Chrome single-instance:** Only one \`SpeechRecognition\` instance at a time across the entire browser. If using both speech and the conversation mic, stop one before starting the other.
+- **iOS Safari:** SpeechRecognition auto-stops after ~60s of silence — the runtime auto-restarts transparently.
+- **iOS Safari:** TTS requires cancel-before-speak and keepalive — handled by the runtime.`,
   source: { type: 'builtin' },
   installedAt: 0,
 };
@@ -387,60 +264,56 @@ const floMedia: StoredSkill = {
   },
   instructions: `# flo Media — Camera & Microphone Access
 
-## Why You Need This
+Do NOT use \`navigator.mediaDevices.getUserMedia()\` — it is blocked in the sandbox. \`flo.getCamera()\` proxies through WebRTC from the shell: the shell captures the hardware camera/mic, then streams it to your iframe over a local WebRTC connection. From your page's perspective, you get a standard \`MediaStream\`. This architecture is why you MUST use \`flo.stopMediaStream(stream)\` instead of \`track.stop()\` — stopping local tracks does not tell the shell to release the hardware.
 
-Your page runs in an opaque-origin sandboxed iframe. \`navigator.mediaDevices.getUserMedia()\` is **BLOCKED** and will always fail. Use the flo media API instead — it transparently proxies media from the shell via WebRTC.
+## Execution Mode
 
-## API Reference
+These APIs require a browser connection (\`browser-only\`, \`browser-with-hub\`, \`hub-with-browser\`). In \`hub-only\` mode, they do not exist — there is no browser, no iframe, no shell relay. \`flo.getCamera()\`, \`flo.getMicrophone()\`, and \`flo.getMediaStream()\` are not available at all.
 
-All methods are available globally in page JavaScript (\`<script>\` tags):
+## API
 
 \`\`\`js
-// Camera only (video MediaStream)
-var stream = await flo.getCamera();
-
-// Microphone only (audio MediaStream)
-var stream = await flo.getMicrophone();
-
-// Combined or custom
-var stream = await flo.getMediaStream({ video: true, audio: true });
-
-// Stop stream and release hardware
-flo.stopMediaStream(stream);
-
-// Request permission before media access (optional — auto-prompted on first use)
-// Returns true/false for browser permission, throws if agent-level approval denied
-var granted = await flo.requestPermission('camera');
-var granted = await flo.requestPermission('microphone');
+var stream = await flo.getCamera();                              // video only
+var stream = await flo.getMicrophone();                          // audio only
+var stream = await flo.getMediaStream({ video: true, audio: true }); // combined
+flo.stopMediaStream(stream);                                     // release hardware
+var granted = await flo.requestPermission('camera');             // proactive permission check
 \`\`\`
 
-All media methods return Promises. Timeout is 60 seconds.
+All methods return Promises. Timeout is 60 seconds.
 
-IMPORTANT: Do NOT call \`stream.getTracks().forEach(t => t.stop())\` directly — that only stops the local receiving end. The shell keeps capturing from the camera/mic hardware. You MUST use \`flo.stopMediaStream(stream)\` to properly release the device.
+> **Constraint limitation:** Only boolean video/audio constraints are supported (\`{ video: true }\`, \`{ video: false }\`). Detailed constraints like \`facingMode\`, resolution, or frame rate are coerced to boolean — do not use them.
+
+> **Single stream:** Only one camera stream at a time. Call \`flo.stopMediaStream()\` on the existing stream before requesting a new one.
+
+> **DOM persistence:** Media streams do not survive DOM persistence. After a restore, re-acquire the camera.
 
 ## Permission Flow
 
-1. Agent calls \`flo.getCamera()\` (or \`getMediaStream\`/\`getMicrophone\`)
-2. If camera isn't pre-enabled in agent settings, user sees an approval dialog: Deny / Allow Once / Allow Always
-3. If denied at the approval dialog, the Promise **rejects** with an Error
-4. If approved, browser's native permission prompt appears (if not already granted)
-5. MediaStream is delivered via WebRTC loopback
+Two stages: (1) agent approval dialog (Deny / Allow Once / Allow Always), then (2) browser native permission prompt. If the agent-level dialog is denied, the Promise **rejects** with an Error. If the browser prompt is denied, you get a \`NotAllowedError\`.
 
-\`flo.requestPermission(type)\` lets you request permission proactively. Same flow: approval dialog → browser prompt. Resolves \`true\`/\`false\` for browser grant, but **throws** if the agent-level approval dialog is denied. Wrap in try/catch.
+\`flo.requestPermission('camera')\` triggers the same flow proactively. It returns \`true\`/\`false\` for the browser grant, but **throws** if the agent-level approval is denied. Wrap in try/catch.
 
-## Complete Camera Preview Example
+## Error Handling
+
+\`\`\`js
+try {
+  var stream = await flo.getCamera();
+} catch (e) {
+  // "Permission \\"camera\\" was denied by the user." — agent approval denied
+  // "Media capture failed: NotFoundError: ..."       — no camera device
+  // "Media capture failed: NotAllowedError: ..."     — browser permission denied
+  // "Media request timed out"                        — 60s timeout
+}
+\`\`\`
+
+## Camera Preview Example
 
 \`\`\`html
-<div id="preview-container">
-  <video id="camera" playsinline autoplay style="width:100%;border-radius:12px"></video>
-</div>
-<div style="display:flex;gap:12px;margin-top:12px">
-  <button onclick="startCamera()" id="startBtn">Start Camera</button>
-  <button onclick="takePhoto()" id="photoBtn" style="display:none">Take Photo</button>
-  <button onclick="stopCamera()" id="stopBtn" style="display:none">Stop</button>
-</div>
+<video id="camera" playsinline autoplay muted style="width:100%"></video>
+<button onclick="startCamera()" id="startBtn">Start Camera</button>
+<button onclick="stopCamera()" id="stopBtn" style="display:none">Stop</button>
 <canvas id="canvas" style="display:none"></canvas>
-<div id="photos"></div>
 
 <script>
 var cameraStream = null;
@@ -450,23 +323,10 @@ async function startCamera() {
     cameraStream = await flo.getCamera();
     document.getElementById('camera').srcObject = cameraStream;
     document.getElementById('startBtn').style.display = 'none';
-    document.getElementById('photoBtn').style.display = '';
     document.getElementById('stopBtn').style.display = '';
   } catch (e) {
     flo.notify('camera_error', { error: e.message });
   }
-}
-
-function takePhoto() {
-  var video = document.getElementById('camera');
-  var canvas = document.getElementById('canvas');
-  canvas.width = video.videoWidth;
-  canvas.height = video.videoHeight;
-  canvas.getContext('2d').drawImage(video, 0, 0);
-  var img = document.createElement('img');
-  img.src = canvas.toDataURL('image/jpeg', 0.8);
-  img.style.cssText = 'width:100%;border-radius:8px;margin-top:8px';
-  document.getElementById('photos').prepend(img);
 }
 
 function stopCamera() {
@@ -476,42 +336,31 @@ function stopCamera() {
   }
   document.getElementById('camera').srcObject = null;
   document.getElementById('startBtn').style.display = '';
-  document.getElementById('photoBtn').style.display = 'none';
   document.getElementById('stopBtn').style.display = 'none';
 }
 </script>
 \`\`\`
 
-## Error Handling
+## Vision Pattern — Sending Frames to the Agent
 
-Media requests reject on failure — always wrap in try/catch:
+Capture a video frame to canvas, convert to dataURL, send via \`flo.notify()\`:
 
 \`\`\`js
-try {
-  var stream = await flo.getCamera();
-} catch (e) {
-  // e.message will be one of:
-  // "Permission \\"camera\\" was denied by the user." — agent-level approval denied
-  // "Media capture failed: NotFoundError: ..."       — no camera device
-  // "Media capture failed: NotAllowedError: ..."     — browser permission denied
-  // "Media request timed out"                        — 60s timeout
+function sendFrameToAgent() {
+  var video = document.getElementById('camera');
+  var canvas = document.getElementById('canvas');
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  canvas.getContext('2d').drawImage(video, 0, 0);
+  flo.notify('frame_captured', { image: canvas.toDataURL('image/jpeg', 0.7) });
 }
 \`\`\`
 
-## Platform Notes
+## Platform Gotchas
 
-- **iOS Safari**: \`getUserMedia()\` always fails in sandboxed srcdoc iframes — the WebRTC proxy handles this transparently
-- **iOS Safari**: Video elements MUST have both \`playsinline\` and \`autoplay\` attributes or video won't display
-- **Chrome**: Only one \`SpeechRecognition\` instance at a time — if using both speech and media, stop speech first
-- **All browsers**: Always call \`flo.stopMediaStream(stream)\` when done to release camera/mic hardware
-
-## Best Practices
-
-- Always use \`playsinline autoplay\` on video elements: \`<video playsinline autoplay>\`
-- ALWAYS use \`flo.stopMediaStream(stream)\` to stop — never \`track.stop()\` directly (WebRTC proxy requires shell-side cleanup)
-- Use \`flo.requestPermission()\` proactively if you want to handle denial before showing camera UI
-- Build the complete UI with \`<script>\` tags in a single \`dom create\` — don't use separate runjs calls
-- For photo capture: draw video frame to a hidden \`<canvas>\`, then use \`canvas.toDataURL()\``,
+- **\`muted\` attribute:** Use \`<video playsinline autoplay muted>\` for reliable autoplay. Chrome's autoplay policy requires \`muted\` for auto-playing video.
+- **iOS Safari:** Video elements MUST have both \`playsinline\` and \`autoplay\` or video won't display.
+- **Active streams drain battery** on mobile — stop them when not needed.`,
   source: { type: 'builtin' },
   installedAt: 0,
 };
@@ -526,63 +375,54 @@ const floGeolocation: StoredSkill = {
   },
   instructions: `# flo Geolocation — Location Access
 
-## Why You Need This
+Do NOT use \`navigator.geolocation\` — it is blocked in the sandbox. \`flo.geolocation\` proxies through the shell via postMessage. The shell calls the native Geolocation API and relays position data back to your iframe.
 
-Your page runs in an opaque-origin sandboxed iframe. \`navigator.geolocation\` is **BLOCKED** and will always fail. Use \`flo.geolocation\` instead — it proxies through the shell.
+> **CRITICAL — flat response shape:** The response is FLAT: \`pos.latitude\`, NOT \`pos.coords.latitude\`. The native Geolocation API nests coords under \`pos.coords\`, but \`flo.geolocation\` flattens them to top-level properties.
 
-## API Reference
+## Execution Mode
 
-All methods are available globally in page JavaScript (\`<script>\` tags):
+These APIs require a browser connection (\`browser-only\`, \`browser-with-hub\`, \`hub-with-browser\`). In \`hub-only\` mode, they do not exist — there is no browser, no iframe, no shell relay. \`flo.geolocation\` is not available at all.
 
-### One-Shot Position
+## One-Shot Position
 
 \`\`\`js
-// Returns Promise<{ latitude, longitude, accuracy, altitude, altitudeAccuracy, heading, speed, timestamp }>
 var pos = await flo.geolocation.getCurrentPosition();
+// pos = { latitude, longitude, accuracy, altitude, altitudeAccuracy, heading, speed, timestamp }
+console.log(pos.latitude, pos.longitude, pos.accuracy);
 
 // With options
 var pos = await flo.geolocation.getCurrentPosition({
   enableHighAccuracy: true,   // GPS vs network (default: false)
-  timeout: 10000,             // max wait in ms (default: 30000)
+  timeout: 10000,             // browser-side geolocation timeout in ms
   maximumAge: 60000           // accept cached position up to N ms old (default: 0)
 });
-
-console.log(pos.latitude, pos.longitude, pos.accuracy);
 \`\`\`
 
-### Continuous Tracking
+> **30-second proxy timeout:** There is a hard 30-second ceiling on the proxy round-trip regardless of the \`timeout\` option you pass. The \`timeout\` option only controls the browser's internal geolocation timeout — the overall shell proxy wrapping times out at 30s. Setting \`timeout: 60000\` will NOT extend the proxy timeout.
+
+> **Nullable fields:** \`altitude\`, \`altitudeAccuracy\`, \`heading\`, and \`speed\` can be \`null\`. Only \`latitude\`, \`longitude\`, and \`accuracy\` are reliably present.
+
+## Continuous Tracking
 
 \`\`\`js
-// Returns a watch session with .stop() method
 var watch = flo.geolocation.watchPosition(
   function(pos) {
-    // Called on each position update
-    console.log(pos.latitude, pos.longitude);
     document.getElementById('coords').textContent = pos.latitude + ', ' + pos.longitude;
   },
   function(err) {
-    // Optional error callback
     console.error('Location error:', err.message, 'code:', err.code);
   },
-  { enableHighAccuracy: true }  // Optional options
+  { enableHighAccuracy: true }
 );
 
-// Stop tracking
-watch.stop();
+watch.stop();  // stop tracking
 \`\`\`
 
 ## Permission Flow
 
-1. Agent calls \`flo.geolocation.getCurrentPosition()\` or \`watchPosition()\`
-2. If geolocation isn't pre-enabled in agent settings, user sees approval dialog: Deny / Allow Once / Allow Always
-3. If denied, the Promise rejects (getCurrentPosition) or error callback fires (watchPosition)
-4. If approved, browser's native geolocation prompt appears (if not already granted)
-5. Position data is proxied from shell to iframe via postMessage
+Two stages: (1) agent approval dialog (Deny / Allow Once / Allow Always), then (2) browser native geolocation prompt. If agent-level approval is denied, the Promise rejects. If the browser prompt is denied, you get a \`PERMISSION_DENIED\` error.
 
-You can also request permission proactively:
-\`\`\`js
-var granted = await flo.requestPermission('geolocation');
-\`\`\`
+\`flo.requestPermission('geolocation')\` triggers the same flow proactively. It **throws** if agent-level approval is denied, returns \`true\`/\`false\` for the browser grant. Wrap in try/catch.
 
 ## Error Handling
 
@@ -590,35 +430,33 @@ var granted = await flo.requestPermission('geolocation');
 try {
   var pos = await flo.geolocation.getCurrentPosition();
 } catch (e) {
-  // e.message contains the error description
-  // Common errors:
-  // "Permission \\"geolocation\\" was denied by the user."  — agent-level approval denied
+  // "Permission \\"geolocation\\" was denied by the user." — agent approval denied
   // "User denied Geolocation"                               — browser permission denied
   // "Position unavailable"                                   — device can't determine position
-  // "Timeout expired"                                        — took too long
+  // "Timeout expired"                                        — browser geolocation timeout
   // "Geolocation request timed out"                          — 30s proxy timeout
 }
 \`\`\`
 
-Error codes (from GeolocationPositionError):
-- 1 = PERMISSION_DENIED
-- 2 = POSITION_UNAVAILABLE
-- 3 = TIMEOUT
+For \`watchPosition\`, errors arrive via the error callback as \`{ message, code }\` where code is 1 (PERMISSION_DENIED), 2 (POSITION_UNAVAILABLE), or 3 (TIMEOUT).
 
-## Complete Example — Location Display
+## Hub Pattern — Storing Location for Offline Use
+
+For hub-persisted agents, store the last-known position in \`flo.state\` so it is available during \`hub-only\` periods when no browser is connected:
+
+\`\`\`js
+var pos = await flo.geolocation.getCurrentPosition({ enableHighAccuracy: true });
+flo.state.lastPosition = { lat: pos.latitude, lng: pos.longitude, accuracy: pos.accuracy, ts: pos.timestamp };
+\`\`\`
+
+## Example
 
 \`\`\`html
-<div id="location" style="padding:20px;font-family:system-ui">
-  <h2>My Location</h2>
-  <div id="coords">Getting location...</div>
-  <div id="accuracy" style="color:#666;margin-top:4px"></div>
-  <button onclick="getLocation()" style="margin-top:12px;padding:8px 16px">Refresh</button>
-  <button onclick="toggleWatch()" id="watchBtn" style="margin-top:12px;padding:8px 16px">Start Tracking</button>
-</div>
+<div id="coords">Getting location...</div>
+<div id="accuracy"></div>
+<button onclick="getLocation()">Refresh</button>
 
 <script>
-var currentWatch = null;
-
 async function getLocation() {
   try {
     var pos = await flo.geolocation.getCurrentPosition({ enableHighAccuracy: true });
@@ -628,37 +466,15 @@ async function getLocation() {
     document.getElementById('coords').textContent = 'Error: ' + e.message;
   }
 }
-
-function toggleWatch() {
-  if (currentWatch) {
-    currentWatch.stop();
-    currentWatch = null;
-    document.getElementById('watchBtn').textContent = 'Start Tracking';
-  } else {
-    currentWatch = flo.geolocation.watchPosition(
-      function(pos) {
-        document.getElementById('coords').textContent = pos.latitude.toFixed(6) + ', ' + pos.longitude.toFixed(6);
-        document.getElementById('accuracy').textContent = 'Accuracy: ' + Math.round(pos.accuracy) + 'm';
-      },
-      function(err) {
-        document.getElementById('coords').textContent = 'Error: ' + err.message;
-      },
-      { enableHighAccuracy: true }
-    );
-    document.getElementById('watchBtn').textContent = 'Stop Tracking';
-  }
-}
-
 getLocation();
 </script>
 \`\`\`
 
-## Platform Notes
+## Platform Gotchas
 
-- **All browsers**: \`navigator.geolocation\` always fails in sandboxed srcdoc iframes — the shell proxy handles this transparently
-- **iOS Safari**: May require HTTPS for geolocation access (the dev server uses HTTPS by default)
-- **Accuracy**: \`enableHighAccuracy: true\` uses GPS (slower, more battery) vs network location (faster, less accurate)
-- **Indoor**: GPS may not work indoors — \`enableHighAccuracy: false\` often gives better results indoors via WiFi positioning`,
+- **GPS indoors:** \`enableHighAccuracy: true\` uses GPS which may not work indoors. \`enableHighAccuracy: false\` uses WiFi positioning, which is often better indoors.
+- **iOS Safari:** Requires HTTPS for geolocation (the dev server uses HTTPS by default).
+- **Battery:** High-accuracy continuous tracking (\`watchPosition\` with \`enableHighAccuracy: true\`) drains battery significantly on mobile.`,
   source: { type: 'builtin' },
   installedAt: 0,
 };
@@ -674,115 +490,78 @@ const floHub: StoredSkill = {
   },
   instructions: `# flo Hub — Persistent Agent Runtime
 
-## Two Modes
+You're running on a hub server, which means you persist beyond browser sessions and can execute autonomously. When no browser is connected, you keep running — your schedules fire, your files stay on disk, your state persists. When a browser connects, it becomes a display surface for your page, but the hub remains the authoritative source for all state and execution.
 
-Hub persistence gives you two modes. Check \`capabilities\` → \`executionMode\`:
+This skill covers the tools and patterns unique to hub persistence: scheduling autonomous tasks, sending push notifications, using hub-side JavaScript execution, and adapting when browsers connect and disconnect. The system prompt already covers execution modes and standard tools — this skill focuses on what's different and what goes wrong.
 
-### hub-with-browser — A browser is connected
-**Your page is a fully interactive living page.** Use the architect pattern exactly as in browser mode: page JS handles UI updates in event handlers, \`flo.notify()\` sends events to you, inline \`<script>\` tags execute, \`runjs\`, \`dom listen\`, \`view_state\` all work. Build interactive pages with JS — don't hold back because you're on a hub.
+**CRITICAL — things that do NOT work on the hub:**
+- Do NOT use \`new Notification()\` or \`navigator.serviceWorker\` — they don't exist here. Use \`flo.push()\` or \`flo.notify_user()\` instead.
+- Do NOT use \`bash sleep\` for delays — use \`flo.sleep(ms)\` in runjs. \`bash sleep\` wastes a process.
+- Do NOT assume UTC for cron — cron uses the hub server's local timezone. Check \`capabilities\` -> \`timezone\`.
+- Do NOT use \`context: 'iframe'\` in hub runjs — it is silently ignored. There is no iframe on the hub.
+- Scheduled tasks ALWAYS run on the hub, even if a browser was connected when you created them.
 
-Additionally, you have hub-native tools: \`bash\`, \`filesystem\`, \`schedule\`, \`runjs\` (hub-side).
+## Scheduling — Autonomous Execution
 
-### hub-only — No browser connected
-You are running autonomously. Structural DOM only — \`dom create/modify/query/remove\` work via JSDOM but with limitations:
-- No JS execution — \`<script>\` tags are stored but don't run until a browser connects
-- No rendering — dimensions report as 0x0
-- No events — \`dom listen/wait_for\` unavailable
+Scheduling is the most important hub capability. It lets your agent act on its own — checking for updates, sending reminders, running maintenance — without anyone initiating a conversation.
 
-Use \`state\`, \`files\`, \`bash\`, \`filesystem\`, \`schedule\`, and \`runjs\` for autonomous work.
+**Two trigger modes, and the choice matters:**
 
-## Hub-Native Tools (always available)
-- \`bash\` — shell commands in your working directory
-- \`filesystem\` — read/write server files
-- \`runjs\` — execute JavaScript on the hub with \`flo.*\` API (see below)
-- \`state\` — reactive state store (persists across restarts)
-- \`files\` — agent workspace files (disk-backed, not browser OPFS)
-- \`schedule\` — cron jobs and event triggers (supports direct tool execution)
-- \`capabilities\`, \`context_search\`, \`list_skills\`, \`get_skill\`
+A **message trigger** wakes your full agentic loop. You receive the message, think about it, and decide what to do. This costs tokens and takes time. Use it when the task requires judgment — "Check the weather and decide whether to alert the user":
 
-## Hub-Side runjs — \`flo.*\` API
-
-On the hub, \`runjs\` executes in a sandboxed VM (no Node.js builtins) with a \`flo.*\` bridge API:
-
-### State & Storage
-- \`flo.state.get(key)\` / \`flo.state.set(key, value)\` / \`flo.state.getAll()\` — persistent reactive state
-- \`flo.storage.get(key)\` / \`flo.storage.set(key, value)\` / \`flo.storage.delete(key)\` / \`flo.storage.list()\` — key-value storage
-
-### Communication & Notifications
-- \`flo.notify(message)\` — send a message to yourself (queued if busy, delivered after current loop)
-- \`flo.notify_user(message)\` — send push notification to user's devices (use this for important alerts)
-- \`flo.push({ title, body })\` — send push notification with custom title/body
-
-### Tools & Events
-- \`flo.callTool(name, input)\` — call any available tool from JS (cannot call \`runjs\` recursively)
-- \`flo.emit(eventName, data)\` — fire an event that triggers matching event-based schedules
-- \`flo.fetch(url, options)\` — HTTP fetch with SSRF protection (private IPs blocked)
-
-### Other
-- \`flo.sleep(ms)\` — sleep/delay for the specified milliseconds (timer-based, shares worker event loop)
-- \`flo.agent.id\` — your hub agent ID
-- \`flo.log(...args)\` — log to console output (captured and returned)
-- \`flo.ask()\` — not available on hub (would deadlock the agentic loop)
-
-### Examples
 \`\`\`
-// Send a push notification
-runjs({ code: 'flo.push({ title: "Weather Alert", body: "Rain expected at 3pm" })' })
-
-// Read and transform state
-runjs({ code: 'const score = await flo.state.get("score"); await flo.state.set("score", score + 1); return score + 1' })
-
-// Call another tool from JS
-runjs({ code: 'const result = await flo.callTool("bash", { command: "uptime" }); return result' })
-
-// Fetch external data
-runjs({ code: 'const resp = await flo.fetch("https://api.example.com/data"); return resp.text' })
+schedule({ action: 'add', type: 'cron', cron: '*/30 * * * *', message: 'Check weather conditions and alert if rain expected' })
 \`\`\`
 
-Standard timer APIs (\`setTimeout\`, \`clearTimeout\`, \`setInterval\`, \`clearInterval\`) are available. Default timeout is 5 minutes.
+A **stored tool call** executes a single tool directly, with no LLM involvement. Zero token cost, near-instant execution. Use it for mechanical tasks where the action is always the same — "Send a reminder every morning":
 
-IMPORTANT: Hub runjs has NO DOM or browser APIs (document, window, etc). To update the page, use \`flo.callTool("dom", { action: "modify", selector: "#myEl", html: "new content" })\`. Hub runjs always runs in worker context — \`context: 'iframe'\` is silently ignored on the hub.
-
-## Schedule Tool — Autonomous Execution
-
-The \`schedule\` tool lets you set up triggers that run when no one is around. Two trigger modes:
-
-### Message Triggers (wake the agent)
-Sends a message that starts an LLM loop — use when the agent needs to think and respond:
 \`\`\`
-schedule({ action: 'add', type: 'cron', cron: '*/5 * * * *', message: 'Check for updates' })
-schedule({ action: 'add', type: 'cron', cron: '0 9 * * 1-5', message: 'Daily standup summary', maxRuns: 5 })
+schedule({ action: 'add', type: 'cron', cron: '0 9 * * 1-5', tool: 'runjs', toolInput: { code: 'flo.push({ title: "Good morning", body: "Time to check your tasks" })' } })
 \`\`\`
 
-### Stored Tool Calls (no agent wakeup)
-Executes a tool directly without starting an LLM loop — lightweight, no token cost:
-\`\`\`
-// Send a push notification every hour — no LLM call needed
-schedule({ action: 'add', type: 'cron', cron: '0 * * * *', tool: 'runjs', toolInput: { code: 'flo.push({ title: "Reminder", body: "Check your tasks" })' } })
+You can also store bash commands:
 
-// Run a bash command on a schedule
-schedule({ action: 'add', type: 'cron', cron: '0 0 * * *', tool: 'bash', toolInput: { command: 'df -h > /tmp/disk-report.txt' } })
+\`\`\`
+schedule({ action: 'add', type: 'cron', cron: '0 0 * * *', tool: 'bash', toolInput: { command: 'df -h > disk-report.txt' } })
 \`\`\`
 
-Specify exactly one of \`message\` or \`tool\` — not both.
+Specify exactly one of \`message\` or \`tool\`/\`toolInput\` — not both.
 
-### Cron Format
-\`minute hour day month weekday\`
+**Cron format:** \`minute hour day month weekday\`
 - \`*\` = every, \`*/N\` = every N, \`N\` = specific, \`N-M\` = range, \`N,M\` = list
 - Examples: \`*/5 * * * *\` (every 5 min), \`0 */2 * * *\` (every 2 hours), \`30 9 * * 1-5\` (9:30 AM weekdays)
 - Minimum interval: 1 minute. Maximum 10 schedules per agent.
 
-### Event Triggers (reactive)
+**TIMEZONE — a common source of bugs.** Cron schedules execute in the hub server's local timezone, reported in \`capabilities\` as \`timezone\`. If you want "9 AM in Sydney" but the hub runs in UTC, you must calculate the UTC equivalent (23:00 the previous day). Always check \`capabilities.timezone\` before creating time-specific schedules, and tell the user what timezone the schedule will use.
+
+**maxRuns:** Use \`maxRuns\` when a schedule should fire a limited number of times. After that many executions, the schedule auto-disables. Useful for one-shot delayed tasks or time-limited monitoring:
+
+\`\`\`
+schedule({ action: 'add', type: 'cron', cron: '0 9 * * 1-5', message: 'Daily standup summary', maxRuns: 5 })
+\`\`\`
+
+**Persistence:** Schedules persist across hub restarts. You do not need to recreate them when you wake up.
+
+**Busy-agent skip:** If a cron trigger fires while you're already processing a message, the trigger is silently skipped — not queued. Don't set intervals shorter than your typical processing time.
+
+### Event Triggers
+
+Event triggers react to specific occurrences rather than time:
+
 \`\`\`
 schedule({ action: 'add', type: 'event', event: 'state:score', condition: '> 100', message: 'Score exceeded 100!' })
-schedule({ action: 'add', type: 'event', event: 'browser:connected', message: 'A browser just connected' })
-schedule({ action: 'add', type: 'event', event: 'browser:disconnected', tool: 'runjs', toolInput: { code: 'flo.push({ title: "Alert", body: "Browser disconnected" })' } })
+schedule({ action: 'add', type: 'event', event: 'browser:connected', message: 'A browser just connected — set up the interactive UI' })
+schedule({ action: 'add', type: 'event', event: 'browser:disconnected', tool: 'runjs', toolInput: { code: 'flo.push({ title: "Notice", body: "Browser disconnected" })' } })
 \`\`\`
 
-Events: \`state:<key>\` (state changes), \`browser:connected\`, \`browser:disconnected\`
-Conditions: \`> N\`, \`< N\`, \`== value\`, \`changed\`, \`always\`, or JS expression
+Available events: \`state:<key>\` (fires when that state key changes), \`browser:connected\`, \`browser:disconnected\`.
+
+Supported condition operators (for \`state:\` events): \`> N\`, \`>= N\`, \`< N\`, \`<= N\`, \`== value\`, \`!= value\`, \`changed\`, \`always\`. These are the ONLY supported conditions — arbitrary expressions are not supported.
+
+Event triggers also support \`message\` vs \`tool\`/\`toolInput\`, same as cron triggers.
 
 ### Managing Schedules
+
 \`\`\`
 schedule({ action: 'list' })                    // show all schedules
 schedule({ action: 'disable', id: 'sched-1' })  // pause a schedule
@@ -790,38 +569,102 @@ schedule({ action: 'enable', id: 'sched-1' })   // resume
 schedule({ action: 'remove', id: 'sched-1' })   // delete
 \`\`\`
 
-## Push Notifications
+**Error handling for stored tool calls:** If a stored tool call fails (e.g., a bash command errors or runjs throws), you receive an error message describing what happened. Design your stored tool calls to be robust — handle edge cases in the code itself.
 
-To send push notifications to the user's devices, use \`flo.notify_user()\` or \`flo.push()\` in hub-side \`runjs\`:
+## Reaching the User: Push Notifications
+
+Three communication methods, each for a different purpose:
+
+- **\`flo.notify(message)\`** — sends a message to YOURSELF. It queues a user-role message that wakes your agentic loop on the next cycle. Use it for self-reminders ("check back on this later"). If you're currently busy, it's delivered after your current loop completes.
+
+- **\`flo.notify_user(message)\`** — sends a push notification to the user's devices. Simple string message. Use for important alerts.
+
+- **\`flo.push({ title, body })\`** — sends a push notification with a custom title and body. Use when you want more control over the notification appearance.
+
+**Suppression:** Push notifications are delivered only when no browser is both connected AND has your tab visible. If the user is actively viewing your page, push is suppressed — they can already see your updates.
+
+A common pattern is scheduling push notifications without waking the agent:
+
 \`\`\`
-runjs({ code: 'flo.notify_user("Task complete!")' })
-runjs({ code: 'flo.push({ title: "My Agent", body: "Something happened" })' })
+schedule({ action: 'add', type: 'cron', cron: '0 9 * * *', tool: 'runjs', toolInput: { code: 'flo.push({ title: "Daily Digest", body: "Your morning summary is ready" })' } })
 \`\`\`
 
-For scheduled push notifications without waking the agent, use stored tool calls:
+## Hub-Side runjs
+
+Hub runjs executes in a sandboxed VM on the server (a SES compartment). You do not have access to Node.js builtins or browser globals — \`document\`, \`window\`, \`require\`, \`process\` do not exist. Instead, you interact with the platform through the \`flo.*\` bridge API.
+
+The key difference from browser runjs: there is no DOM. If you need to update the page, use \`flo.callTool("dom", { action: "modify", ... })\` from within runjs, which routes through the BrowserToolRouter if a browser is connected.
+
+When to use runjs vs direct tool calls: runjs shines when you need to compose multiple operations in one step (read state, compute, write state) or when you want to avoid the overhead of multiple sequential tool calls.
+
+**The \`flo.*\` bridge API:**
+
+State & Storage:
+- \`flo.state.get(key)\` / \`flo.state.set(key, value)\` / \`flo.state.getAll()\` — persistent reactive state
+- \`flo.storage.get(key)\` / \`flo.storage.set(key, value)\` / \`flo.storage.delete(key)\` / \`flo.storage.list()\` — key-value storage
+
+Communication:
+- \`flo.notify(message)\` — send a message to yourself (queued, delivered after current loop)
+- \`flo.notify_user(message)\` — push notification to user (simple string)
+- \`flo.push({ title, body })\` — push notification with custom title/body
+
+Tools & Events:
+- \`flo.callTool(name, input)\` — call any available tool (cannot call \`runjs\` recursively)
+- \`flo.emit(eventName, data)\` — fire an event that triggers matching event-based schedules
+- \`flo.fetch(url, options)\` — HTTP fetch from the hub server (private IPs blocked for SSRF protection)
+
+Other:
+- \`flo.sleep(ms)\` — async delay (timer-based, does not block)
+- \`flo.agent.id\` — your hub agent ID
+- \`flo.log(...args)\` — log output captured and returned in result
+- \`flo.ask()\` — NOT available on hub (would deadlock the agentic loop)
+
+Standard timer APIs (\`setTimeout\`, \`clearTimeout\`, \`setInterval\`, \`clearInterval\`) are available. Default timeout is 5 minutes.
+
+Both \`flo.log()\` and \`console.log()\` capture output that is returned in the runjs result. Use them for debugging.
+
+**Examples:**
+
+Read state, compute, and write back in a single call:
 \`\`\`
-schedule({ action: 'add', type: 'cron', cron: '0 9 * * *', tool: 'runjs', toolInput: { code: 'flo.push({ title: "Good morning", body: "Here\\'s your daily briefing" })' } })
+runjs({ code: 'const score = await flo.state.get("score"); await flo.state.set("score", (score || 0) + 1); return score + 1;' })
 \`\`\`
 
-Push is delivered when no browser tab is actively viewing the agent. If the user is already on the page, push is suppressed.
+Fetch external data and store the result:
+\`\`\`
+runjs({ code: 'const resp = await flo.fetch("https://api.example.com/data"); const data = JSON.parse(resp.text); await flo.state.set("latest_data", data); return data;' })
+\`\`\`
+
+Emit a custom event that can trigger event-based schedules:
+\`\`\`
+runjs({ code: 'await flo.emit("data_refreshed", { count: 42 }); return "event fired";' })
+\`\`\`
+
+## Browser Connection Lifecycle
+
+Even if a browser is connected right now, it may disconnect at any time. Design defensively: if you schedule tasks or set up autonomous workflows, assume they may run without a browser present.
+
+Use event triggers to adapt:
+
+- **\`browser:connected\`** — a browser just connected. Set up interactive features, send a welcome message, start live UI updates.
+- **\`browser:disconnected\`** — the browser left. Your state, files, schedules, and hub-side runjs all continue working normally. DOM operations become structural-only (JSDOM, no JS execution, no events, no rendering).
+
+When no browser is connected, \`dom listen\` and \`dom wait_for\` will return errors. Don't attempt them — use event triggers to know when a browser arrives, then set up listeners.
 
 ## Hub-Side Storage
 
-- **files tool**: workspace files at \`~/.flo-monster/agents/{hubAgentId}/files/\`, disk-backed, persists across restarts
-- **filesystem tool**: general file ops in your sandbox working directory (shown in capabilities)
-- **state tool**: same API as browser mode, hub-stored, persists across restarts, escalation rules preserved
+- **State:** Your state store lives on the hub and persists across restarts. When a browser connects, state is synced to it for display purposes, but the hub remains the authoritative source. Browser state changes are synced from the hub.
+- **Files:** The \`files\` tool provides disk-backed workspace storage that persists across restarts — not browser OPFS.
+- **Working directory / sandbox:** Your bash and filesystem operations are sandboxed to your agent's working directory (shown in \`capabilities\`). You cannot access files outside this directory.
 
-## Best Practices
+## Anti-Patterns
 
-- When a browser is connected, build fully interactive pages with JS — same as browser mode
-- When no browser, use structural DOM + state + schedule + runjs for autonomous work
-- Use \`browser:connected\` event trigger to set up interactive features when a user arrives
-- Use \`browser:disconnected\` to save state and prepare for autonomous mode
-- Use stored tool calls (\`tool\`/\`toolInput\`) in schedules for lightweight recurring tasks (no token cost)
-- Use \`message\` in schedules when the agent needs to think and decide what to do
-- Use \`flo.notify_user()\` or \`flo.push()\` for important alerts — not every loop completion
-- Schedule maintenance tasks (file cleanup, status updates) via cron
-- Files persist on disk — use them for durable memory (\`memory.md\`, \`plan.md\`, etc.)`,
+- **UTC confusion:** Always check \`capabilities.timezone\` before creating time-specific cron schedules. Don't guess — the hub may not be in the timezone you expect.
+- **\`context: 'iframe'\` in scheduled runjs:** Silently ignored. Scheduled tasks always run on the hub server. If you need to update the DOM, use \`flo.callTool('dom', { action: 'modify', ... })\` from within the runjs code.
+- **\`bash sleep\` instead of \`flo.sleep(ms)\`:** Wastes a process and a tool call slot. Use \`flo.sleep(ms)\` for delays inside runjs.
+- **Over-engineering DOM in hub-only mode:** Nobody is watching. Build structural DOM for when a browser connects later, but focus autonomous work on state, files, bash, and schedules — tools that produce tangible results without a display.
+- **State escalation chains for push:** When you need to send a push notification, call \`flo.push()\` directly. Don't create Rube Goldberg chains of state changes and escalation rules — they're harder to debug and more fragile.
+- **Schedule thrashing:** Plan your cron expression before creating the schedule. Each add/remove costs a tool call and can cause missed triggers during the gap. Get the cron expression right the first time.`,
   source: { type: 'builtin' },
   installedAt: 0,
 };
@@ -830,5 +673,5 @@ Push is delivered when no browser tab is actively viewing the agent. If the user
  * Returns all system skills for installation at startup
  */
 export function getSystemSkills(): StoredSkill[] {
-  return [floCookbook, floSrcdoc, floSubagent, floSpeech, floMedia, floGeolocation, floHub];
+  return [floSrcdoc, floSubagent, floSpeech, floMedia, floGeolocation, floHub];
 }

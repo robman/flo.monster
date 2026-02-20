@@ -92,6 +92,9 @@ export class Scheduler {
     if (!params.message && !params.tool) {
       throw new Error('Must specify either message or tool');
     }
+    if (params.tool && !params.toolInput) {
+      throw new Error('toolInput is required when tool is specified');
+    }
 
     // Check max schedules per agent
     const agentCount = this.getSchedules(params.hubAgentId).length;

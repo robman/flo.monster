@@ -6,14 +6,13 @@ describe('getSystemSkills', () => {
 
   it('returns all expected skills', () => {
     const names = skills.map(s => s.name);
-    expect(names).toContain('flo-cookbook');
     expect(names).toContain('flo-srcdoc');
     expect(names).toContain('flo-subagent');
     expect(names).toContain('flo-speech');
     expect(names).toContain('flo-media');
     expect(names).toContain('flo-geolocation');
     expect(names).toContain('flo-hub');
-    expect(skills).toHaveLength(7);
+    expect(skills).toHaveLength(6);
   });
 
   it('all have category system', () => {

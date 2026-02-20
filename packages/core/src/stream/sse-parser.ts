@@ -11,7 +11,7 @@ export class SSEParser {
     const events: SSEEvent[] = [];
     this.buffer += chunk;
 
-    const lines = this.buffer.split('\n');
+    const lines = this.buffer.split('\n').map(l => l.replace(/\r$/, ''));
     // Keep the last incomplete line in buffer
     this.buffer = lines.pop() || '';
 

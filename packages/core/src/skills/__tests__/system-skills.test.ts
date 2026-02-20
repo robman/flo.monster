@@ -4,16 +4,15 @@ import { getSystemSkills } from '../system-skills.js';
 describe('getSystemSkills', () => {
   const skills = getSystemSkills();
 
-  it('returns all 7 expected skills', () => {
+  it('returns all 6 expected skills', () => {
     const names = skills.map(s => s.name);
-    expect(names).toContain('flo-cookbook');
     expect(names).toContain('flo-srcdoc');
     expect(names).toContain('flo-subagent');
     expect(names).toContain('flo-speech');
     expect(names).toContain('flo-media');
     expect(names).toContain('flo-geolocation');
     expect(names).toContain('flo-hub');
-    expect(skills).toHaveLength(7);
+    expect(skills).toHaveLength(6);
   });
 
   it('all have category system', () => {
@@ -48,7 +47,7 @@ describe('getSystemSkills', () => {
 
   it('non-hub skills do NOT have requiredCapabilities', () => {
     const nonHubSkills = skills.filter(s => s.name !== 'flo-hub');
-    expect(nonHubSkills).toHaveLength(6);
+    expect(nonHubSkills).toHaveLength(5);
     for (const skill of nonHubSkills) {
       expect(skill.manifest.requiredCapabilities).toBeUndefined();
     }

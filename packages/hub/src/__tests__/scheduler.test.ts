@@ -317,6 +317,15 @@ describe('Scheduler', () => {
       })).toThrow('Cannot specify both message and tool');
     });
 
+    it('addSchedule rejects tool without toolInput', () => {
+      expect(() => scheduler.addSchedule({
+        hubAgentId: 'agent-1',
+        type: 'cron',
+        cronExpression: '*/5 * * * *',
+        tool: 'runjs',
+      })).toThrow('toolInput is required when tool is specified');
+    });
+
     it('addSchedule rejects neither message nor tool', () => {
       expect(() => scheduler.addSchedule({
         hubAgentId: 'agent-1',

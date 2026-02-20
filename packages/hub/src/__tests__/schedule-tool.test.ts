@@ -24,6 +24,31 @@ describe('schedule tool', () => {
       expect(parsed.cron).toBe('*/5 * * * *');
     });
 
+    it('cron schedule response includes timezone and note', () => {
+      const scheduler = createScheduler();
+      const result = executeScheduleTool(
+        { action: 'add', type: 'cron', cron: '30 15 * * *', message: 'Check status' },
+        'agent-1',
+        scheduler,
+      );
+      const parsed = JSON.parse(result.content);
+      expect(parsed.timezone).toBe(Intl.DateTimeFormat().resolvedOptions().timeZone);
+      expect(parsed.note).toContain('local timezone');
+      expect(parsed.note).toContain(parsed.timezone);
+    });
+
+    it('event schedule response includes timezone but no note', () => {
+      const scheduler = createScheduler();
+      const result = executeScheduleTool(
+        { action: 'add', type: 'event', event: 'state:score', condition: '> 100', message: 'Alert' },
+        'agent-1',
+        scheduler,
+      );
+      const parsed = JSON.parse(result.content);
+      expect(parsed.timezone).toBeDefined();
+      expect(parsed.note).toBeUndefined();
+    });
+
     it('adds an event schedule', () => {
       const scheduler = createScheduler();
       const result = executeScheduleTool(
@@ -87,6 +112,19 @@ describe('schedule tool', () => {
 
       expect(result.is_error).toBe(true);
       expect(result.content).toContain('Cannot specify both message and tool');
+    });
+
+    it('add action with tool but no toolInput returns error', () => {
+      const scheduler = createScheduler();
+      const result = executeScheduleTool({
+        action: 'add',
+        type: 'cron',
+        cron: '*/5 * * * *',
+        tool: 'runjs',
+      }, 'agent-1', scheduler);
+
+      expect(result.is_error).toBe(true);
+      expect(result.content).toContain('toolInput is required when tool is specified');
     });
 
     it('add action with neither message nor tool returns error', () => {

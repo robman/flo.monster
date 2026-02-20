@@ -111,7 +111,7 @@ describe('skill tools', () => {
         const names = skills.map((s: any) => s.name);
 
         // Should include system skills (visible to agents)
-        expect(names).toContain('flo-cookbook');
+        expect(names).toContain('flo-hub');
         expect(names).toContain('flo-hub');
         expect(names).toContain('flo-srcdoc');
       });
@@ -124,7 +124,7 @@ describe('skill tools', () => {
         const names = skills.map((s: any) => s.name);
 
         // System skills should still be listed (agent-visible uses hasHub+hasBrowser context)
-        expect(names).toContain('flo-cookbook');
+        expect(names).toContain('flo-hub');
       });
 
       it('returns installed user skills alongside system skills', async () => {
@@ -146,7 +146,7 @@ describe('skill tools', () => {
 
         // System skills also present
         const names = skills.map((s: any) => s.name);
-        expect(names).toContain('flo-cookbook');
+        expect(names).toContain('flo-hub');
       });
 
       it('excludes non-system non-user-invocable skills', async () => {
@@ -205,12 +205,12 @@ describe('skill tools', () => {
       });
 
       it('returns system skill details', async () => {
-        const result = await executeSkillTool('get_skill', { name: 'flo-cookbook' }, manager, undefined, 'agent-1');
+        const result = await executeSkillTool('get_skill', { name: 'flo-hub' }, manager, undefined, 'agent-1');
 
         expect(result.is_error).toBeUndefined();
         const skill = JSON.parse(result.content);
 
-        expect(skill.name).toBe('flo-cookbook');
+        expect(skill.name).toBe('flo-hub');
         expect(skill.source.type).toBe('builtin');
         expect(skill.instructions).toBeTruthy();
       });
@@ -303,16 +303,16 @@ Instructions`;
 
       it('returns error when trying to remove a system skill', async () => {
         // System skill exists
-        expect(manager.hasSkill('flo-cookbook')).toBe(true);
+        expect(manager.hasSkill('flo-hub')).toBe(true);
 
-        const result = await executeSkillTool('remove_skill', { name: 'flo-cookbook' }, manager);
+        const result = await executeSkillTool('remove_skill', { name: 'flo-hub' }, manager);
 
         // remove() returns false for builtins, which the tool handler reports as failure
         expect(result.is_error).toBe(true);
         expect(result.content).toContain('Failed to remove');
 
         // Skill should still exist
-        expect(manager.hasSkill('flo-cookbook')).toBe(true);
+        expect(manager.hasSkill('flo-hub')).toBe(true);
       });
     });
 

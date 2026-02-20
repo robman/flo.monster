@@ -552,18 +552,17 @@ Agents discover detailed guidance through a skill system rather than receiving i
 
 ### Design
 
-The system prompt is kept slim (~20 lines of essentials). Detailed guidance is delegated to skills that agents load on demand:
+The system prompt provides comprehensive guidance on execution modes, page architecture, the flo API, and event handling. Deeper capability-specific guidance is delegated to skills that agents load on demand:
 
 ```
 Agent calls list_skills → sees available skills
-Agent calls get_skill('flo-cookbook') → receives detailed patterns and recipes
+Agent calls get_skill('flo-hub') → receives detailed hub persistence patterns
 ```
 
 ### Built-In Skills
 
 | Skill | Purpose |
 |-------|---------|
-| `flo-cookbook` | Common patterns: state management, forms, responsive layouts |
 | `flo-srcdoc` | Save/load UI snapshots as .srcdoc files, multi-skin management |
 | `flo-subagent` | Spawning subagents: configuration, communication, lifecycle |
 | `flo-speech` | Speech recognition and synthesis: API usage, iOS Safari quirks |

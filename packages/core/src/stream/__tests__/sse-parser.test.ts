@@ -63,6 +63,31 @@ describe('SSEParser', () => {
     expect(events[1].data).toBe('second');
   });
 
+  it('handles \\r\\n line endings (Gemini SSE format)', () => {
+    const events = parser.feed('data: {"candidates":[{"content":{"parts":[{"text":"Hello"}]}}]}\r\n\r\ndata: {"candidates":[{"content":{"parts":[{"text":" world"}]}}]}\r\n\r\n');
+    expect(events).toHaveLength(2);
+    expect(events[0].data).toBe('{"candidates":[{"content":{"parts":[{"text":"Hello"}]}}]}');
+    expect(events[1].data).toBe('{"candidates":[{"content":{"parts":[{"text":" world"}]}}]}');
+  });
+
+  it('handles \\r\\n line endings split across chunks', () => {
+    let events = parser.feed('data: first\r\n');
+    expect(events).toHaveLength(0);
+    events = parser.feed('\r\ndata: second\r\n\r\n');
+    expect(events).toHaveLength(2);
+    expect(events[0].data).toBe('first');
+    expect(events[1].data).toBe('second');
+  });
+
+  it('handles mixed \\n and \\r\\n line endings', () => {
+    const events = parser.feed('event: a\r\ndata: first\r\n\r\nevent: b\ndata: second\n\n');
+    expect(events).toHaveLength(2);
+    expect(events[0].event).toBe('a');
+    expect(events[0].data).toBe('first');
+    expect(events[1].event).toBe('b');
+    expect(events[1].data).toBe('second');
+  });
+
   it('reset clears state', () => {
     parser.feed('event: partial\ndata: incom');
     parser.reset();

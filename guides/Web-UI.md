@@ -233,7 +233,7 @@ const state = { count: 0 };  // "state is already declared"
 
 ## Best Practices
 
-These patterns come from the built-in flo-cookbook skill that agents can load on demand:
+These patterns come from the system prompt and built-in skills that agents receive:
 
 - **Set initial UI immediately, refine later.** Use `dom create` to build the complete page in one call, then use `dom modify` for incremental updates.
 - **Use semantic HTML.** Proper structure helps the agent understand and modify the page.

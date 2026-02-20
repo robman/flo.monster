@@ -485,14 +485,14 @@ Instructions`;
 
     it('resolves builtin system skills without error (system skills registered in hub)', async () => {
       // HubSkillManager.load() registers system skills via getSystemSkills()
-      // 'flo-cookbook' is a real system skill
+      // 'flo-hub' is a real system skill
       skillManager.load();
 
       const session = createMockSession({
         version: 2,
         dependencies: {
           skills: [{
-            name: 'flo-cookbook',
+            name: 'flo-hub',
             source: { type: 'builtin' },
           }],
           extensions: [],

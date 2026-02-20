@@ -1310,9 +1310,10 @@ describe('Gemini Adapter', () => {
 });
 
 describe('GEMINI_MODELS', () => {
-  it('has all 6 model entries', () => {
+  it('has all 7 model entries', () => {
     const modelIds = Object.keys(GEMINI_MODELS);
-    expect(modelIds).toHaveLength(6);
+    expect(modelIds).toHaveLength(7);
+    expect(modelIds).toContain('gemini-3.1-pro-preview');
     expect(modelIds).toContain('gemini-3-pro-preview');
     expect(modelIds).toContain('gemini-3-flash-preview');
     expect(modelIds).toContain('gemini-2.5-pro');

@@ -124,9 +124,9 @@ describe('createSkillToolsPlugins', () => {
 
     it('should return system skills with category marker', async () => {
       const systemSkill: StoredSkill = {
-        name: 'flo-cookbook',
+        name: 'flo-hub',
         manifest: {
-          name: 'flo-cookbook',
+          name: 'flo-hub',
           description: 'Core patterns',
           category: 'system',
           userInvocable: false,
@@ -152,14 +152,14 @@ describe('createSkillToolsPlugins', () => {
 
       const parsed = JSON.parse(result.content as string);
       expect(parsed).toHaveLength(1);
-      expect(parsed[0].name).toBe('flo-cookbook');
+      expect(parsed[0].name).toBe('flo-hub');
       expect(parsed[0].category).toBe('system');
     });
 
     it('should return both system and user skills', async () => {
       skillManager.installBuiltin({
-        name: 'flo-cookbook',
-        manifest: { name: 'flo-cookbook', description: 'System ref', category: 'system', userInvocable: false },
+        name: 'flo-hub',
+        manifest: { name: 'flo-hub', description: 'System ref', category: 'system', userInvocable: false },
         instructions: 'System content',
         source: { type: 'builtin' },
         installedAt: 0,
@@ -188,7 +188,7 @@ describe('createSkillToolsPlugins', () => {
       const parsed = JSON.parse(result.content as string);
       expect(parsed).toHaveLength(2);
       const names = parsed.map((s: { name: string }) => s.name);
-      expect(names).toContain('flo-cookbook');
+      expect(names).toContain('flo-hub');
       expect(names).toContain('my-command');
     });
   });

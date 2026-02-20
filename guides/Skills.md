@@ -9,7 +9,7 @@ Of course, your agents can just create this for you if you ask them.
 Agents discover and load skills with two tools:
 
 1. **`capabilities`** -- Tells the agent which skills are available in its current execution context
-2. **`get_skill({ name: 'flo-cookbook' })`** -- Loads the skill content into the conversation
+2. **`get_skill({ name: 'flo-media' })`** -- Loads the skill content into the conversation
 
 Once loaded, the agent reads the content, learns the patterns and APIs described, and applies them. Skills are loaded once per conversation -- the agent remembers the content for the remainder of the session.
 
@@ -23,20 +23,9 @@ Agent: "I need to build a camera feature. Let me check what's available."
 
 ## System Skills
 
-[flo.monster](https://flo.monster) ships with seven built-in system skills. These are always available and cover the core platform capabilities.
+[flo.monster](https://flo.monster) ships with six built-in system skills. These are always available and cover the core platform capabilities. The system prompt provides comprehensive guidance on page architecture, the flo API, event handling, and the architect pattern — skills provide deeper guidance for specific capabilities.
 
-### 1. flo-cookbook
-
-Core patterns and best practices for building agent pages.
-
-- **DOM tool usage** -- Best practices for creating and updating pages (flexbox/grid, responsive layouts, inline handlers)
-- **The flo API** -- `flo.notify()`, `flo.ask()`, `flo.callTool()`, `flo.state` -- the full reference for page-side JavaScript
-- **Architect pattern** -- Build the page with `<script>` tags, set up `flo.state` with escalation rules, and let page JS handle routine interactions while the agent stays idle
-- **Event handling** -- `dom listen`, state escalations, the pattern for waking the agent only when meaningful events occur
-- **Persistent memory** -- Using files (`memory.md`, `plan.md`) and `context_search` to maintain context across sessions
-- **Performance tips and anti-patterns** -- What to do and what to avoid
-
-### 2. flo-srcdoc
+### 1. flo-srcdoc
 
 UI snapshot management -- saving and loading page states.
 
@@ -45,7 +34,7 @@ UI snapshot management -- saving and loading page states.
 - List available skins with `files({ action: 'frontmatter', pattern: '*.srcdoc.md' })`
 - Multi-skin management -- maintain different UIs (dashboard, settings, game) and switch between them
 
-### 3. flo-subagent
+### 2. flo-subagent
 
 Subagent patterns for cost-efficient delegation.
 
@@ -55,7 +44,7 @@ Subagent patterns for cost-efficient delegation.
 - **Depth limits** -- Subagents can nest up to 3 levels deep
 - **Cost optimisation** -- Each subagent call costs roughly 10-20x less than waking the main agent
 
-### 4. flo-speech
+### 3. flo-speech
 
 Voice input and output APIs.
 
@@ -66,7 +55,7 @@ Voice input and output APIs.
 
 See [Voice](Voice.md) for the full guide.
 
-### 5. flo-media
+### 4. flo-media
 
 Camera and microphone access via WebRTC proxy.
 
@@ -78,7 +67,7 @@ Camera and microphone access via WebRTC proxy.
 
 See [Media](Media.md) for the full guide.
 
-### 6. flo-geolocation
+### 5. flo-geolocation
 
 Location services via shell proxy.
 
@@ -87,7 +76,7 @@ Location services via shell proxy.
 - **Error codes** -- Permission denied, position unavailable, timeout
 - **Permission flow** -- Agent-level approval dialog, then browser-native prompt
 
-### 7. flo-hub
+### 6. flo-hub
 
 Hub features for persistent, autonomous agents.
 

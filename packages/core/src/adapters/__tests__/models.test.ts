@@ -40,6 +40,8 @@ describe('Model Registry', () => {
     it('includes new Gemini models', () => {
       expect(ALL_MODELS['gemini-3-flash-preview']).toBeDefined();
       expect(ALL_MODELS['gemini-3-flash-preview'].displayName).toBe('Gemini 3 Flash Preview');
+      expect(ALL_MODELS['gemini-3.1-pro-preview']).toBeDefined();
+      expect(ALL_MODELS['gemini-3.1-pro-preview'].displayName).toBe('Gemini 3.1 Pro Preview');
     });
 
     it('has correct corrected model IDs for Claude 4.5', () => {

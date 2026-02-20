@@ -9,6 +9,15 @@ import { resolveModelId } from './model-aliases.js';
  * Gemini model registry — native Gemini API models.
  */
 export const GEMINI_MODELS: Record<string, ModelInfo> = {
+  // Gemini 3.1 series (preview)
+  'gemini-3.1-pro-preview': {
+    id: 'gemini-3.1-pro-preview',
+    displayName: 'Gemini 3.1 Pro Preview',
+    provider: 'gemini',
+    contextWindow: 1048576,
+    maxOutputTokens: 65536,
+    pricing: { inputPerMillion: 2.0, outputPerMillion: 12.0 },
+  },
   // Gemini 3 series (preview)
   'gemini-3-pro-preview': {
     id: 'gemini-3-pro-preview',

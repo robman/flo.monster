@@ -246,9 +246,9 @@ Process $ARGUMENTS`;
 
     it('returns system skills by name', () => {
       const manager = new HubSkillManager();
-      const skill = manager.getSkill('flo-cookbook');
+      const skill = manager.getSkill('flo-hub');
       expect(skill).toBeDefined();
-      expect(skill?.name).toBe('flo-cookbook');
+      expect(skill?.name).toBe('flo-hub');
       expect(skill?.source.type).toBe('builtin');
     });
   });
@@ -272,7 +272,7 @@ Process $ARGUMENTS`;
 
     it('returns true for system skills', () => {
       const manager = new HubSkillManager();
-      expect(manager.hasSkill('flo-cookbook')).toBe(true);
+      expect(manager.hasSkill('flo-hub')).toBe(true);
       expect(manager.hasSkill('flo-hub')).toBe(true);
     });
   });
@@ -292,7 +292,7 @@ Process $ARGUMENTS`;
       const names = skills.map(s => s.name);
       expect(names).toContain('list-a');
       expect(names).toContain('list-b');
-      expect(names).toContain('flo-cookbook');
+      expect(names).toContain('flo-hub');
 
       // Clean up
       manager.remove('list-a');
@@ -351,7 +351,7 @@ Instructions`);
       const names = invocable.map(s => s.name);
 
       // System skills have userInvocable: false
-      expect(names).not.toContain('flo-cookbook');
+      expect(names).not.toContain('flo-hub');
       expect(names).not.toContain('flo-hub');
     });
   });
@@ -363,7 +363,7 @@ Instructions`);
       const names = visible.map(s => s.name);
 
       // System skills should be visible to agents
-      expect(names).toContain('flo-cookbook');
+      expect(names).toContain('flo-hub');
       expect(names).toContain('flo-hub');
       expect(names).toContain('flo-srcdoc');
       expect(names).toContain('flo-subagent');
@@ -379,7 +379,7 @@ Instructions`);
       const names = visible.map(s => s.name);
 
       expect(names).toContain('agent-visible');
-      expect(names).toContain('flo-cookbook');
+      expect(names).toContain('flo-hub');
 
       manager.remove('agent-visible');
     });
@@ -408,14 +408,14 @@ Instructions`);
       manager.install(createSkillContent('tracked-skill', 'A tracked skill'));
 
       manager.trackUsage('agent-1', 'tracked-skill');
-      manager.trackUsage('agent-1', 'flo-cookbook');
+      manager.trackUsage('agent-1', 'flo-hub');
 
       const deps = manager.getAgentDependencies('agent-1');
       expect(deps.length).toBe(2);
 
       const names = deps.map(d => d.name);
       expect(names).toContain('tracked-skill');
-      expect(names).toContain('flo-cookbook');
+      expect(names).toContain('flo-hub');
 
       // Each dependency has inline skill data
       for (const dep of deps) {
@@ -434,7 +434,7 @@ Instructions`);
 
     it('clearAgentUsage removes tracking data', () => {
       const manager = new HubSkillManager();
-      manager.trackUsage('agent-2', 'flo-cookbook');
+      manager.trackUsage('agent-2', 'flo-hub');
       expect(manager.getAgentDependencies('agent-2').length).toBe(1);
 
       manager.clearAgentUsage('agent-2');
