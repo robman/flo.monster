@@ -579,7 +579,7 @@ After=network.target
 Type=simple
 User=flo-hub
 WorkingDirectory=/home/flo-hub/flo.monster/packages/hub
-ExecStart=/bin/bash -c 'source /home/flo-hub/setup-env.sh && exec node ../../node_modules/.bin/tsx src/index.ts'
+ExecStart=/bin/bash -c 'source /home/flo-hub/setup-env.sh && exec node node_modules/.bin/tsx src/index.ts'
 Restart=always
 RestartSec=5
 PrivateTmp=true
@@ -1203,6 +1203,11 @@ setup_systemd() {
 # -----------------------------------------------------------------------------
 run_direct_install() {
   check_direct_prerequisites
+  # Switch to a universally accessible directory so that 'sudo -u flo-hub'
+  # commands don't fail trying to restore the caller's CWD (e.g. /home/user
+  # on Debian where home dirs are 700). This prevents spurious errors like
+  # "find: Failed to restore initial working directory: Permission denied".
+  cd /
   create_users
   install_apt_packages
   install_node
@@ -1388,7 +1393,7 @@ print_direct_results() {
     echo "  flo-admin config      View configuration"
     echo "  flo-admin uninstall   Remove the hub"
   else
-    echo "  Start manually:    sudo -u flo-hub bash -c 'source ~/setup-env.sh && cd ~/flo.monster/packages/hub && node ../../node_modules/.bin/tsx src/index.ts'"
+    echo "  Start manually:    sudo -u flo-hub bash -c 'source ~/setup-env.sh && cd ~/flo.monster/packages/hub && node node_modules/.bin/tsx src/index.ts'"
   fi
 
   echo
