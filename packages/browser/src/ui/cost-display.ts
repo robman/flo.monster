@@ -68,12 +68,30 @@ export class CostDisplay {
       this.budgetEl.textContent = parts.join(' | ');
 
       if (overBudget) {
-        this.budgetEl.style.color = 'var(--color-error)';
+        this.budgetEl.className = 'status-bar__item budget--critical';
+        this.costEl.className = 'status-bar__item status-bar__item--clickable budget--critical';
+      } else if (budget.maxCostUsd !== undefined && remaining.costUsd !== undefined) {
+        const utilization = 1 - (remaining.costUsd / budget.maxCostUsd);
+        if (utilization > 0.9) {
+          this.budgetEl.className = 'status-bar__item budget--critical';
+          this.costEl.className = 'status-bar__item status-bar__item--clickable budget--critical';
+        } else if (utilization > 0.75) {
+          this.budgetEl.className = 'status-bar__item budget--high';
+          this.costEl.className = 'status-bar__item status-bar__item--clickable budget--high';
+        } else if (utilization > 0.5) {
+          this.budgetEl.className = 'status-bar__item budget--medium';
+          this.costEl.className = 'status-bar__item status-bar__item--clickable budget--medium';
+        } else {
+          this.budgetEl.className = 'status-bar__item';
+          this.costEl.className = 'status-bar__item status-bar__item--clickable';
+        }
       } else {
-        this.budgetEl.style.color = '';
+        this.budgetEl.className = 'status-bar__item';
+        this.costEl.className = 'status-bar__item status-bar__item--clickable';
       }
     } else {
       this.budgetEl.style.display = 'none';
+      this.costEl.className = 'status-bar__item status-bar__item--clickable';
     }
   }
 

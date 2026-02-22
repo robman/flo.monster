@@ -19,6 +19,8 @@ import type {
 } from '@flo-monster/core';
 import { runAgenticLoop, extractTerseSummary, buildContextMessages } from '@flo-monster/core';
 import type { LoopDeps } from '@flo-monster/core';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import type { AgentStore } from './agent-store.js';
 import type { ToolResult } from './tools/index.js';
 import { HubAgentStateStore, type HubStateData } from './tools/hub-state.js';
@@ -41,6 +43,8 @@ export interface RunnerDeps {
   hubAgentId?: string;
   /** Additional tool definitions to inject for the LLM (hub-native tools like bash, filesystem, schedule) */
   hubToolDefs?: Array<{ name: string; description: string; input_schema: { type: 'object'; properties: Record<string, unknown>; required: readonly string[] } }>;
+  /** Root directory for agent files (for writing context.json after each turn) */
+  filesRoot?: string;
 }
 
 export class HeadlessAgentRunner {
@@ -710,6 +714,21 @@ export class HeadlessAgentRunner {
         totalCost: this.totalCost,
         savedAt: Date.now(),
       });
+
+      // Write context.json to files directory (matches browser behavior)
+      if (this.deps.filesRoot) {
+        try {
+          await mkdir(this.deps.filesRoot, { recursive: true });
+          const messages = this.messageHistory.map(m => ({
+            role: m.role,
+            content: m.content,
+            ...(m.turnId ? { turnId: m.turnId } : {}),
+          }));
+          await writeFile(join(this.deps.filesRoot, 'context.json'), JSON.stringify(messages), 'utf-8');
+        } catch (err) {
+          console.warn('[HeadlessAgentRunner] Failed to write context.json:', err);
+        }
+      }
     } catch (err) {
       console.warn('[HeadlessAgentRunner] Failed to save after loop:', err);
     }

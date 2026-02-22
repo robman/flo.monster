@@ -4,8 +4,9 @@
  */
 
 import { readFile, writeFile, readdir, mkdir, rm, realpath } from 'node:fs/promises';
-import { resolve, dirname, relative, join } from 'node:path';
+import { resolve, dirname, relative, join, extname } from 'node:path';
 import type { ToolDef, ToolResult } from './index.js';
+import type { SerializedFile } from '@flo-monster/core';
 
 export interface HubFilesInput {
   action: 'read_file' | 'write_file' | 'list_files' | 'delete_file' | 'mkdir' | 'list_dir' | 'frontmatter';
@@ -310,4 +311,41 @@ export async function unpackFilesToDisk(
       await writeFile(resolved, file.content, 'utf-8');
     }
   }
+}
+
+/**
+ * Binary file extensions that should be encoded as base64 when packing.
+ */
+const BINARY_EXTENSIONS = new Set([
+  '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.ico',
+  '.pdf', '.zip', '.tar', '.gz', '.7z', '.rar',
+  '.exe', '.dll', '.so', '.dylib', '.wasm', '.bin'
+]);
+
+/**
+ * Pack files from disk into SerializedFile[].
+ * Reverse of unpackFilesToDisk — reads all files under filesRoot
+ * and returns them as serialized file objects.
+ */
+export async function packFilesFromDisk(filesRoot: string): Promise<SerializedFile[]> {
+  const files: SerializedFile[] = [];
+  let paths: string[];
+  try {
+    paths = await listAllFiles(filesRoot, filesRoot);
+  } catch {
+    return files; // No files directory
+  }
+  for (const relPath of paths) {
+    const fullPath = join(filesRoot, relPath);
+    const ext = extname(relPath).toLowerCase();
+    const isBinary = BINARY_EXTENSIONS.has(ext);
+    if (isBinary) {
+      const buf = await readFile(fullPath);
+      files.push({ path: relPath, content: buf.toString('base64'), encoding: 'base64' });
+    } else {
+      const text = await readFile(fullPath, 'utf-8');
+      files.push({ path: relPath, content: text, encoding: 'utf8' });
+    }
+  }
+  return files;
 }

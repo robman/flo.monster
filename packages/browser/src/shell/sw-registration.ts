@@ -148,7 +148,7 @@ export function setupUpdateListener(): void {
   navigator.serviceWorker.addEventListener('message', (event) => {
     const data = event.data;
     if (!data || data.type !== 'update_available') return;
-    showUpdateBanner(data.version);
+    showUpdateBannerIfAllowed(data.version);
   });
 }
 
@@ -156,7 +156,7 @@ export function setupUpdateListener(): void {
  * Manually trigger a version check via the service worker.
  */
 export function triggerVersionCheck(): void {
-  const controller = navigator.serviceWorker.controller;
+  const controller = navigator.serviceWorker?.controller;
   if (controller) {
     controller.postMessage({ type: 'check_update' });
   }
@@ -186,7 +186,89 @@ export function requestForceRefresh(): void {
   navigator.serviceWorker.controller?.postMessage({ type: 'force_refresh' });
 }
 
-function showUpdateBanner(version: string): void {
+/**
+ * Detect new SWs entering `waiting` state and show the update banner.
+ * Covers three scenarios:
+ * 1. SW already in waiting state at page load
+ * 2. SW currently installing (watch statechange for transition to installed)
+ * 3. Future updates (updatefound event on registration)
+ */
+export function setupWaitingSwDetection(): void {
+  if (!('serviceWorker' in navigator)) return;
+
+  navigator.serviceWorker.getRegistration().then(reg => {
+    if (!reg) return;
+
+    // 1. Already waiting at page load
+    if (reg.waiting) {
+      showUpdateBannerIfAllowed();
+      return;
+    }
+
+    // 2. Currently installing — watch for transition to installed
+    if (reg.installing) {
+      trackInstallingWorker(reg.installing);
+    }
+
+    // 3. Future updates
+    reg.addEventListener('updatefound', () => {
+      const newWorker = reg.installing;
+      if (newWorker) {
+        trackInstallingWorker(newWorker);
+      }
+    });
+  }).catch(() => {});
+}
+
+function trackInstallingWorker(worker: ServiceWorker): void {
+  worker.addEventListener('statechange', () => {
+    if (worker.state === 'installed' && navigator.serviceWorker.controller) {
+      // New SW installed while an existing one controls the page = update waiting
+      showUpdateBannerIfAllowed();
+    }
+  });
+}
+
+// Pending version to show when leaving homepage
+let pendingUpdateVersion: string | undefined;
+let homepageObserver: MutationObserver | null = null;
+
+/**
+ * Check if the user is currently on the homepage skin.
+ */
+function isOnHomepage(): boolean {
+  return document.body.classList.contains('mode-homepage');
+}
+
+/**
+ * Show the update banner if the user is not on the homepage.
+ * If on the homepage, defer the banner until the user navigates away.
+ */
+export function showUpdateBannerIfAllowed(version?: string): void {
+  if (version) pendingUpdateVersion = version;
+
+  if (isOnHomepage()) {
+    // Defer: set up observer to detect when user leaves homepage
+    if (!homepageObserver) {
+      homepageObserver = new MutationObserver(() => {
+        if (!isOnHomepage()) {
+          homepageObserver?.disconnect();
+          homepageObserver = null;
+          showUpdateBanner(pendingUpdateVersion);
+        }
+      });
+      homepageObserver.observe(document.body, {
+        attributes: true,
+        attributeFilter: ['class'],
+      });
+    }
+    return;
+  }
+
+  showUpdateBanner(version ?? pendingUpdateVersion);
+}
+
+function showUpdateBanner(version?: string): void {
   // Don't show duplicate banners
   if (document.getElementById('update-banner')) return;
 
@@ -196,7 +278,7 @@ function showUpdateBanner(version: string): void {
 
   const text = document.createElement('span');
   text.className = 'update-banner__text';
-  text.textContent = `Update available (v${version})`;
+  text.textContent = version ? `Update available (v${version})` : 'Update available';
 
   const refreshBtn = document.createElement('button');
   refreshBtn.className = 'update-banner__refresh btn btn--primary';

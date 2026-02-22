@@ -10,6 +10,7 @@ import { createFormField } from '../dom-helpers.js';
 export function createBudgetSection(
   agent: AgentContainer,
   callbacks: AgentSettingsCallbacks,
+  onResetUsage?: (agentId: string) => void,
 ): HTMLElement {
   const el = document.createElement('div');
   el.className = 'settings-budget';
@@ -51,5 +52,21 @@ export function createBudgetSection(
 
   el.appendChild(tokenField);
   el.appendChild(costField);
+
+  // Reset usage button
+  if (onResetUsage) {
+    const resetBtn = document.createElement('button');
+    resetBtn.className = 'btn btn--sm';
+    resetBtn.textContent = 'Reset Usage';
+    resetBtn.style.marginTop = 'var(--spacing-sm)';
+    resetBtn.style.alignSelf = 'flex-start';
+    resetBtn.addEventListener('click', () => {
+      onResetUsage(agent.id);
+      resetBtn.textContent = 'Usage Reset';
+      setTimeout(() => { resetBtn.textContent = 'Reset Usage'; }, 2000);
+    });
+    el.appendChild(resetBtn);
+  }
+
   return el;
 }

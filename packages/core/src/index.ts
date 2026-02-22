@@ -10,6 +10,8 @@ export { ToolRegistry } from './tools/registry.js';
 export { ToolPluginRegistry } from './tools/plugin-registry.js';
 export { CostTracker } from './cost/tracker.js';
 export type { Budget, BudgetStatus } from './cost/tracker.js';
+export { calculateCost, estimateCostForModel } from './adapters/cost-utils.js';
+export { MODEL_PRICING } from './data/model-pricing.js';
 export {
   serializeSession,
   deserializeSession,

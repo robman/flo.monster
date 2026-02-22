@@ -7,7 +7,7 @@ import { ExtensionLoader } from './extension-loader.js';
 import { ExtensionConfigStore } from './extension-config-store.js';
 import { HubClient } from './hub-client.js';
 import { KeyStore } from './key-store.js';
-import { createAnthropicAdapter, CostTracker, ToolPluginRegistry, getAdapter, type SerializedDomState, type SerializedSession } from '@flo-monster/core';
+import { CostTracker, ToolPluginRegistry, type SerializedDomState, type SerializedSession } from '@flo-monster/core';
 import { HookManager } from './hook-manager.js';
 import { SkillManager } from './skill-manager.js';
 import { TemplateManager } from './template-manager.js';
@@ -23,10 +23,11 @@ import { showSkillApprovalDialog, showConfirmDialog } from '../ui/skill-dialogs.
 import { getSystemSkills } from './system-skills.js';
 import { UIManager } from './ui-manager.js';
 import { setupPwaInstall } from './pwa-install.js';
-import { setupUpdateListener } from './sw-registration.js';
+import { setupUpdateListener, setupWaitingSwDetection } from './sw-registration.js';
 import { LifecycleManager } from './lifecycle-manager.js';
 import { CredentialsManager } from './credentials-manager.js';
 import { DirtyTracker } from './dirty-tracker.js';
+import { getStorageProvider } from '../storage/agent-storage.js';
 import { HubAgentProxy } from './hub-agent-proxy.js';
 import { OfflineBanner } from '../ui/offline-banner.js';
 import { NotificationPanel } from '../ui/notification-panel.js';
@@ -255,6 +256,9 @@ class Shell {
     // Listen for SW update notifications (version check broadcasts)
     setupUpdateListener();
 
+    // Detect new SWs entering waiting state (after skipWaiting removal)
+    setupWaitingSwDetection();
+
     // Listen for SW messages (caches_cleared, notification_click)
     navigator.serviceWorker?.addEventListener('message', (event) => {
       if (event.data?.type === 'caches_cleared') {
@@ -400,6 +404,19 @@ class Shell {
       agent.setHubDomState(domState as SerializedDomState);
     });
 
+    // Handle file push notifications from hub agents (initial + incremental sync)
+    this.hubClient.onFilePush(async (hubAgentId, path, content, action) => {
+      const localAgentId = this.hubAgentMapping.get(hubAgentId);
+      if (!localAgentId) return;
+
+      const provider = await getStorageProvider();
+      if (action === 'write' && content !== undefined) {
+        await provider.writeFile(localAgentId, path, content);
+      } else if (action === 'delete') {
+        await provider.deleteFile(localAgentId, path).catch(() => {});
+      }
+    });
+
     // Handle context change notifications from hub
     this.hubClient.onContextChange((hubAgentId, change, availableTools) => {
       console.log(`[flo] Context change for hub agent ${hubAgentId}: ${change}, tools: ${availableTools.length}`);
@@ -463,8 +480,7 @@ class Shell {
   }
 
   private initCostTracking(statusBar: HTMLElement, statusState: HTMLElement): void {
-    const adapter = createAnthropicAdapter();
-    this.costTracker = new CostTracker(adapter);
+    this.costTracker = new CostTracker();
     this.costDisplay = new CostDisplay(statusBar, {
       getAgentList: () => {
         return this.agentManager.getAllAgents().map(a => ({ id: a.id, name: a.config.name }));
@@ -474,31 +490,29 @@ class Shell {
       },
     });
 
-    // Listen for usage events
+    // Listen for usage events (cumulative from both browser worker and hub)
     document.addEventListener('usage-update', ((e: CustomEvent) => {
       if (this.costTracker && this.costDisplay) {
         const agentId = e.detail.agentId;
         const agent = agentId ? this.agentManager.getAgent(agentId) : null;
         const model = agent?.config.model || DEFAULT_MODEL;
-        this.costTracker.addUsage(model, e.detail.usage);
-        this.costDisplay.update(this.costTracker.getBudgetStatus());
 
-        // Track per-agent costs
         if (agentId) {
-          const agentProvider = agent?.config.provider || 'anthropic';
-          const agentModel = agent?.config.model || DEFAULT_MODEL;
-          const costAdapter = getAdapter(agentProvider);
-          const turnCost = costAdapter.estimateCost(agentModel, e.detail.usage);
-          const currentCost = this.agentCosts.get(agentId) || 0;
-          const newCost = currentCost + turnCost.totalCost;
-          this.agentCosts.set(agentId, newCost);
+          // Usage is cumulative — SET, don't ADD
+          this.costTracker.setAgentUsage(agentId, model, e.detail.usage);
+
+          // Update per-agent cost from tracker (derived from correct model pricing)
+          const agentCost = this.costTracker.getAgentCost(agentId);
+          this.agentCosts.set(agentId, agentCost);
 
           // Update dashboard card if visible
           const dashboard = this.uiManager.getDashboard();
           if (dashboard) {
-            dashboard.updateAgentCost(agentId, newCost);
+            dashboard.updateAgentCost(agentId, agentCost);
           }
         }
+
+        this.costDisplay.update(this.costTracker.getBudgetStatus());
       }
     }) as EventListener);
 

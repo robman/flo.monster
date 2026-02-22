@@ -119,7 +119,19 @@ export class UIManager {
    */
   initPanels(): void {
     // Agent settings panel
-    this.agentSettingsPanel = new AgentSettingsPanel(document.body);
+    this.agentSettingsPanel = new AgentSettingsPanel(document.body, {
+      onResetUsage: (agentId: string) => {
+        const costTracker = this.deps.getCostTracker();
+        if (costTracker) {
+          costTracker.resetAgent(agentId);
+          this.deps.getAgentCosts().set(agentId, 0);
+          const costDisplay = this.deps.getCostDisplay();
+          costDisplay?.update(costTracker.getBudgetStatus());
+          // Update dashboard card
+          this.dashboard?.updateAgentCost(agentId, 0);
+        }
+      },
+    });
     this.agentSettingsPanel.setHubClient(this.deps.hubClient);
 
     // Agent files panel

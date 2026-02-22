@@ -3,7 +3,10 @@
  * conversation history sending, and error handling.
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { mkdtemp, rm, writeFile as fsWriteFile, mkdir as fsMkdir } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { WebSocket } from 'ws';
 import type { SerializedSession, AgentConfig } from '@flo-monster/core';
 import { handleSubscribeAgent } from '../handlers/agent-handler.js';
@@ -185,5 +188,79 @@ describe('handleSubscribeAgent', () => {
       expect(Array.isArray(msg.content)).toBe(true);
       expect(msg.content[0].type).toBe('text');
     }
+  });
+
+  describe('file sync on subscribe', () => {
+    let testDir: string;
+
+    afterEach(async () => {
+      if (testDir) {
+        await rm(testDir, { recursive: true, force: true }).catch(() => {});
+      }
+    });
+
+    it('sends file_push messages for files on disk', async () => {
+      testDir = await mkdtemp(join(tmpdir(), 'subscribe-files-test-'));
+      const agentId = 'hub-agent-1';
+
+      // Create files on disk
+      const filesDir = join(testDir, agentId, 'files');
+      await fsMkdir(filesDir, { recursive: true });
+      await fsWriteFile(join(filesDir, 'hello.txt'), 'hello world', 'utf-8');
+      await fsWriteFile(join(filesDir, 'data.json'), '{"key": "value"}', 'utf-8');
+
+      const client = createMockClient();
+      const runner = createMockRunner();
+      const agents = new Map([[agentId, runner]]);
+
+      handleSubscribeAgent(client, { type: 'subscribe_agent', agentId }, agents, testDir);
+
+      // file_push is async (uses .then()), so we need to wait
+      await new Promise(resolve => setTimeout(resolve, 100));
+
+      const sentMessages = parseSentMessages(client);
+      const filePushMsgs = sentMessages.filter((m: any) => m.type === 'file_push');
+      expect(filePushMsgs).toHaveLength(2);
+
+      const paths = filePushMsgs.map((m: any) => m.path).sort();
+      expect(paths).toEqual(['data.json', 'hello.txt']);
+
+      for (const msg of filePushMsgs) {
+        expect(msg.hubAgentId).toBe(agentId);
+        expect(msg.action).toBe('write');
+        expect(msg.content).toBeDefined();
+      }
+    });
+
+    it('sends no file_push messages when no files exist', async () => {
+      testDir = await mkdtemp(join(tmpdir(), 'subscribe-files-test-'));
+      const agentId = 'hub-agent-1';
+
+      const client = createMockClient();
+      const runner = createMockRunner();
+      const agents = new Map([[agentId, runner]]);
+
+      handleSubscribeAgent(client, { type: 'subscribe_agent', agentId }, agents, testDir);
+
+      // Wait for async
+      await new Promise(resolve => setTimeout(resolve, 100));
+
+      const sentMessages = parseSentMessages(client);
+      const filePushMsgs = sentMessages.filter((m: any) => m.type === 'file_push');
+      expect(filePushMsgs).toHaveLength(0);
+    });
+
+    it('does not send file_push when agentStorePath is not provided', () => {
+      const client = createMockClient();
+      const runner = createMockRunner();
+      const agents = new Map([['hub-agent-1', runner]]);
+
+      // No agentStorePath — 4th arg undefined
+      handleSubscribeAgent(client, { type: 'subscribe_agent', agentId: 'hub-agent-1' }, agents);
+
+      const sentMessages = parseSentMessages(client);
+      const filePushMsgs = sentMessages.filter((m: any) => m.type === 'file_push');
+      expect(filePushMsgs).toHaveLength(0);
+    });
   });
 });

@@ -2,74 +2,16 @@ import type { Message, ApiToolDef, TokenUsage } from '../types/messages.js';
 import type { AgentConfig } from '../types/agent.js';
 import type { AgentEvent } from '../types/events.js';
 import type { ProviderAdapter, CostEstimate, SSEEvent, ModelInfo } from '../types/provider.js';
-import { calculateCost } from './cost-utils.js';
-import { resolveModelId } from './model-aliases.js';
+import { estimateCostForModel } from './cost-utils.js';
+
+import { MODEL_PRICING } from '../data/model-pricing.js';
 
 /**
- * Gemini model registry — native Gemini API models.
+ * Gemini model registry — derived from centralized model-pricing.
  */
-export const GEMINI_MODELS: Record<string, ModelInfo> = {
-  // Gemini 3.1 series (preview)
-  'gemini-3.1-pro-preview': {
-    id: 'gemini-3.1-pro-preview',
-    displayName: 'Gemini 3.1 Pro Preview',
-    provider: 'gemini',
-    contextWindow: 1048576,
-    maxOutputTokens: 65536,
-    pricing: { inputPerMillion: 2.0, outputPerMillion: 12.0 },
-  },
-  // Gemini 3 series (preview)
-  'gemini-3-pro-preview': {
-    id: 'gemini-3-pro-preview',
-    displayName: 'Gemini 3 Pro Preview',
-    provider: 'gemini',
-    contextWindow: 1048576,
-    maxOutputTokens: 65536,
-    pricing: { inputPerMillion: 2.0, outputPerMillion: 12.0 },
-  },
-  'gemini-3-flash-preview': {
-    id: 'gemini-3-flash-preview',
-    displayName: 'Gemini 3 Flash Preview',
-    provider: 'gemini',
-    contextWindow: 1048576,
-    maxOutputTokens: 65536,
-    pricing: { inputPerMillion: 0.50, outputPerMillion: 3.0 },
-  },
-  // Gemini 2.5 series
-  'gemini-2.5-pro': {
-    id: 'gemini-2.5-pro',
-    displayName: 'Gemini 2.5 Pro',
-    provider: 'gemini',
-    contextWindow: 1048576,
-    maxOutputTokens: 65536,
-    pricing: { inputPerMillion: 1.25, outputPerMillion: 10.0 },
-  },
-  'gemini-2.5-flash': {
-    id: 'gemini-2.5-flash',
-    displayName: 'Gemini 2.5 Flash',
-    provider: 'gemini',
-    contextWindow: 1048576,
-    maxOutputTokens: 65536,
-    pricing: { inputPerMillion: 0.30, outputPerMillion: 2.50 },
-  },
-  'gemini-2.5-flash-lite': {
-    id: 'gemini-2.5-flash-lite',
-    displayName: 'Gemini 2.5 Flash-Lite',
-    provider: 'gemini',
-    contextWindow: 1048576,
-    maxOutputTokens: 65536,
-    pricing: { inputPerMillion: 0.10, outputPerMillion: 0.40 },
-  },
-  // Gemini 2.0 series (deprecated March 31, 2026)
-  'gemini-2.0-flash': {
-    id: 'gemini-2.0-flash',
-    displayName: 'Gemini 2.0 Flash (Deprecated)',
-    provider: 'gemini',
-    contextWindow: 1048576,
-    maxOutputTokens: 8192,
-    pricing: { inputPerMillion: 0.10, outputPerMillion: 0.40 },
-  },
-};
+export const GEMINI_MODELS: Record<string, ModelInfo> = Object.fromEntries(
+  Object.entries(MODEL_PRICING).filter(([, m]) => m.provider === 'gemini')
+);
 
 /**
  * Convert a JSON Schema to Gemini's native format.
@@ -206,6 +148,7 @@ export function createGeminiAdapter(): ProviderAdapter {
   let textAccum = '';
   let hasText = false;
   let hadToolCalls = false;  // Stateful across chunks — Gemini can split functionCall and finishReason into separate SSE chunks
+  let callUsage = { input_tokens: 0, output_tokens: 0 };  // Accumulate usage across chunks, emit once on finishReason
 
   return {
     id: 'gemini',
@@ -347,17 +290,23 @@ export function createGeminiAdapter(): ProviderAdapter {
         }
       }
 
-      // Usage metadata (usually on the final chunk)
+      // Accumulate usage metadata (Gemini sends cumulative values in multiple chunks)
       const usageMetadata = p.usageMetadata as Record<string, unknown> | undefined;
       if (usageMetadata) {
-        events.push({
-          type: 'usage',
-          usage: {
-            input_tokens: (usageMetadata.promptTokenCount as number) || 0,
-            output_tokens: (usageMetadata.candidatesTokenCount as number) || 0,
-          },
-          cost: { inputCost: 0, outputCost: 0, totalCost: 0, currency: 'USD' },
-        });
+        callUsage.input_tokens = Math.max(callUsage.input_tokens, (usageMetadata.promptTokenCount as number) || 0);
+        callUsage.output_tokens = Math.max(callUsage.output_tokens, (usageMetadata.candidatesTokenCount as number) || 0);
+      }
+
+      // Emit accumulated usage on finishReason (one usage event per API call)
+      if (candidates && candidates.length > 0 && candidates[0].finishReason) {
+        if (callUsage.input_tokens > 0 || callUsage.output_tokens > 0) {
+          events.push({
+            type: 'usage',
+            usage: { ...callUsage },
+            cost: { inputCost: 0, outputCost: 0, totalCost: 0, currency: 'USD' },
+          });
+          callUsage = { input_tokens: 0, output_tokens: 0 };
+        }
       }
 
       return events;
@@ -373,11 +322,7 @@ export function createGeminiAdapter(): ProviderAdapter {
     },
 
     estimateCost(model: string, usage: TokenUsage): CostEstimate {
-      const info = GEMINI_MODELS[resolveModelId(model)];
-      if (!info) {
-        return { inputCost: 0, outputCost: 0, totalCost: 0, currency: 'USD' };
-      }
-      return calculateCost(usage, info.pricing);
+      return estimateCostForModel(model, usage);
     },
 
     resetState(): void {
@@ -385,6 +330,7 @@ export function createGeminiAdapter(): ProviderAdapter {
       textAccum = '';
       hasText = false;
       hadToolCalls = false;
+      callUsage = { input_tokens: 0, output_tokens: 0 };
     },
   };
 }

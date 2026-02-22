@@ -4,121 +4,13 @@ import type {
 import type { AgentConfig } from '../types/agent.js';
 import type { AgentEvent } from '../types/events.js';
 import type { ProviderAdapter, CostEstimate, SSEEvent, ModelInfo } from '../types/provider.js';
-import { calculateCost } from './cost-utils.js';
-import { resolveModelId } from './model-aliases.js';
+import { estimateCostForModel } from './cost-utils.js';
+import { MODEL_PRICING } from '../data/model-pricing.js';
 
-// OpenAI model pricing (per million tokens)
-export const OPENAI_MODELS: Record<string, ModelInfo> = {
-  // GPT-5.2 series (Feb 2026)
-  'gpt-5.2': {
-    id: 'gpt-5.2',
-    displayName: 'GPT-5.2',
-    provider: 'openai',
-    contextWindow: 400000,
-    maxOutputTokens: 131072,
-    pricing: { inputPerMillion: 1.75, outputPerMillion: 14.0 },
-  },
-  'gpt-5.2-pro': {
-    id: 'gpt-5.2-pro',
-    displayName: 'GPT-5.2 Pro',
-    provider: 'openai',
-    contextWindow: 400000,
-    maxOutputTokens: 131072,
-    pricing: { inputPerMillion: 21.0, outputPerMillion: 168.0 },
-  },
-  // GPT-5 series (Aug 2025)
-  'gpt-5': {
-    id: 'gpt-5',
-    displayName: 'GPT-5',
-    provider: 'openai',
-    contextWindow: 400000,
-    maxOutputTokens: 131072,
-    pricing: { inputPerMillion: 1.25, outputPerMillion: 10.0 },
-  },
-  'gpt-5-mini': {
-    id: 'gpt-5-mini',
-    displayName: 'GPT-5 Mini',
-    provider: 'openai',
-    contextWindow: 400000,
-    maxOutputTokens: 131072,
-    pricing: { inputPerMillion: 0.25, outputPerMillion: 2.0 },
-  },
-  'gpt-5-nano': {
-    id: 'gpt-5-nano',
-    displayName: 'GPT-5 Nano',
-    provider: 'openai',
-    contextWindow: 400000,
-    maxOutputTokens: 16384,
-    pricing: { inputPerMillion: 0.05, outputPerMillion: 0.40 },
-  },
-  // GPT-4.1 series
-  'gpt-4.1': {
-    id: 'gpt-4.1',
-    displayName: 'GPT-4.1',
-    provider: 'openai',
-    contextWindow: 1048576,
-    maxOutputTokens: 32768,
-    pricing: { inputPerMillion: 2.0, outputPerMillion: 8.0 },
-  },
-  'gpt-4.1-mini': {
-    id: 'gpt-4.1-mini',
-    displayName: 'GPT-4.1 Mini',
-    provider: 'openai',
-    contextWindow: 1048576,
-    maxOutputTokens: 32768,
-    pricing: { inputPerMillion: 0.40, outputPerMillion: 1.60 },
-  },
-  'gpt-4.1-nano': {
-    id: 'gpt-4.1-nano',
-    displayName: 'GPT-4.1 Nano',
-    provider: 'openai',
-    contextWindow: 1048576,
-    maxOutputTokens: 32768,
-    pricing: { inputPerMillion: 0.10, outputPerMillion: 0.40 },
-  },
-  // GPT-4o series
-  'gpt-4o': {
-    id: 'gpt-4o',
-    displayName: 'GPT-4o',
-    provider: 'openai',
-    contextWindow: 128000,
-    maxOutputTokens: 16384,
-    pricing: { inputPerMillion: 2.5, outputPerMillion: 10.0 },
-  },
-  'gpt-4o-mini': {
-    id: 'gpt-4o-mini',
-    displayName: 'GPT-4o Mini',
-    provider: 'openai',
-    contextWindow: 128000,
-    maxOutputTokens: 16384,
-    pricing: { inputPerMillion: 0.15, outputPerMillion: 0.60 },
-  },
-  // Reasoning models
-  'o3': {
-    id: 'o3',
-    displayName: 'o3',
-    provider: 'openai',
-    contextWindow: 200000,
-    maxOutputTokens: 100000,
-    pricing: { inputPerMillion: 2.0, outputPerMillion: 8.0 },
-  },
-  'o4-mini': {
-    id: 'o4-mini',
-    displayName: 'o4-mini',
-    provider: 'openai',
-    contextWindow: 200000,
-    maxOutputTokens: 100000,
-    pricing: { inputPerMillion: 1.10, outputPerMillion: 4.40 },
-  },
-  'o3-mini': {
-    id: 'o3-mini',
-    displayName: 'o3-mini',
-    provider: 'openai',
-    contextWindow: 200000,
-    maxOutputTokens: 100000,
-    pricing: { inputPerMillion: 1.10, outputPerMillion: 4.40 },
-  },
-};
+// Backward-compatible export — derived from centralized model-pricing
+export const OPENAI_MODELS: Record<string, ModelInfo> = Object.fromEntries(
+  Object.entries(MODEL_PRICING).filter(([, m]) => m.provider === 'openai')
+);
 
 // State for accumulating streamed OpenAI content
 interface OpenAIStreamState {
@@ -416,12 +308,7 @@ export function createOpenAIChatAdapter(): ProviderAdapter {
     },
 
     estimateCost(model: string, usage: TokenUsage): CostEstimate {
-      const info = OPENAI_MODELS[resolveModelId(model)];
-      if (!info) {
-        return { inputCost: 0, outputCost: 0, totalCost: 0, currency: 'USD' };
-      }
-
-      return calculateCost(usage, info.pricing);
+      return estimateCostForModel(model, usage);
     },
 
     resetState(): void {

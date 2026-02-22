@@ -238,8 +238,9 @@ describe('Agentic Loop', () => {
     expect(usageEvents.length).toBeGreaterThanOrEqual(2);
   });
 
-  it('emits only cumulative usage events (no double emit)', async () => {
+  it('emits only one merged usage event per API call (no double-counting)', async () => {
     // message_start has input usage, message_delta has output usage
+    // Adapter merges them and emits ONE usage event at message_delta time
     apiResponses = [[
       'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":100,"output_tokens":0}}}\n\n',
       'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n',
@@ -253,16 +254,11 @@ describe('Agentic Loop', () => {
     await runAgenticLoop(makeConfig(), 'Hi', deps);
 
     const usageEvents = events.filter((e) => e.type === 'usage');
-    // Should have exactly 2 usage events: one for message_start (input tokens) and one for message_delta (output tokens)
-    expect(usageEvents).toHaveLength(2);
-    // First usage event should have input_tokens accumulated
+    // Should have exactly 1 usage event (merged at message_delta time)
+    expect(usageEvents).toHaveLength(1);
     if (usageEvents[0].type === 'usage') {
       expect(usageEvents[0].usage.input_tokens).toBe(100);
-    }
-    // Second usage event should have cumulative output_tokens
-    if (usageEvents[1].type === 'usage') {
-      expect(usageEvents[1].usage.input_tokens).toBe(100);
-      expect(usageEvents[1].usage.output_tokens).toBe(10);
+      expect(usageEvents[0].usage.output_tokens).toBe(10);
     }
   });
 

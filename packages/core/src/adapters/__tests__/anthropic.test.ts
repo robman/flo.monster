@@ -91,18 +91,49 @@ describe('Anthropic Adapter', () => {
       }
     });
 
-    it('captures input tokens from message_start usage', () => {
+    it('does not emit usage from message_start (deferred to message_delta)', () => {
       const event: SSEEvent = {
         event: 'message_start',
         data: '{"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":150,"output_tokens":0}}}',
       };
       const events = adapter.parseSSEEvent(event);
-      expect(events).toHaveLength(2);
+      // Only message_start — no usage event (usage is deferred to message_delta)
+      expect(events).toHaveLength(1);
       expect(events[0].type).toBe('message_start');
-      expect(events[1].type).toBe('usage');
-      if (events[1].type === 'usage') {
-        expect(events[1].usage.input_tokens).toBe(150);
-        expect(events[1].usage.output_tokens).toBe(0);
+    });
+
+    it('emits merged usage once at message_delta, not double-counted', () => {
+      // Simulate message_start with input_tokens
+      adapter.parseSSEEvent({
+        data: '{"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":150,"output_tokens":0}}}',
+      });
+      // Simulate message_delta with output_tokens (Anthropic may also repeat input_tokens)
+      const events = adapter.parseSSEEvent({
+        data: '{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":42}}',
+      });
+      // Should emit exactly one usage event with merged totals
+      const usageEvents = events.filter((e) => e.type === 'usage');
+      expect(usageEvents).toHaveLength(1);
+      if (usageEvents[0].type === 'usage') {
+        expect(usageEvents[0].usage.input_tokens).toBe(150);
+        expect(usageEvents[0].usage.output_tokens).toBe(42);
+      }
+    });
+
+    it('merges cache token fields across message_start and message_delta', () => {
+      adapter.parseSSEEvent({
+        data: '{"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":200,"output_tokens":0,"cache_creation_input_tokens":50,"cache_read_input_tokens":100}}}',
+      });
+      const events = adapter.parseSSEEvent({
+        data: '{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":30}}',
+      });
+      const usageEvents = events.filter((e) => e.type === 'usage');
+      expect(usageEvents).toHaveLength(1);
+      if (usageEvents[0].type === 'usage') {
+        expect(usageEvents[0].usage.input_tokens).toBe(200);
+        expect(usageEvents[0].usage.output_tokens).toBe(30);
+        expect(usageEvents[0].usage.cache_creation_input_tokens).toBe(50);
+        expect(usageEvents[0].usage.cache_read_input_tokens).toBe(100);
       }
     });
 

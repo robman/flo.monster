@@ -12,6 +12,7 @@ import { createContextSection } from './context-section.js';
 export interface AgentSettingsCallbacks {
   onConfigChange?: (agentId: string, changes: Partial<import('@flo-monster/core').AgentConfig>) => void;
   onRestartAgent?: (agentId: string) => void;
+  onResetUsage?: (agentId: string) => void;
 }
 
 export class AgentSettingsPanel {
@@ -75,7 +76,7 @@ export class AgentSettingsPanel {
     content.appendChild(this.createSection('Tools', createToolsSection(agent, this.callbacks, this.hubClient)));
 
     // Section: Budget
-    content.appendChild(this.createSection('Budget', createBudgetSection(agent, this.callbacks)));
+    content.appendChild(this.createSection('Budget', createBudgetSection(agent, this.callbacks, this.callbacks.onResetUsage)));
 
     // Section: Network Policy
     content.appendChild(this.createSection('Network Policy', createNetworkSection(agent, this.callbacks, this.hubClient)));

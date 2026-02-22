@@ -63,6 +63,7 @@ export interface RunnerToolExecutorDeps {
   pushManager?: PushManager;
   runner?: HeadlessAgentRunner;
   agentDataDir?: string;
+  onFileChange?: (path: string, content: string | undefined, action: 'write' | 'delete') => void;
 }
 
 /**
@@ -121,7 +122,16 @@ async function executeRunnerToolCall(
   // Hub-side files: execute locally if available, else route to browser
   if (name === 'files') {
     if (deps.filesRoot) {
-      return executeHubFiles(input as unknown as HubFilesInput, deps.filesRoot);
+      const result = await executeHubFiles(input as unknown as HubFilesInput, deps.filesRoot);
+      if (!result.is_error && deps.onFileChange) {
+        const fileInput = input as unknown as HubFilesInput;
+        if (fileInput.action === 'write_file' && fileInput.path) {
+          deps.onFileChange(fileInput.path, fileInput.content, 'write');
+        } else if (fileInput.action === 'delete_file' && fileInput.path) {
+          deps.onFileChange(fileInput.path, undefined, 'delete');
+        }
+      }
+      return result;
     }
     if (deps.browserToolRouter && deps.hubAgentId) {
       return deps.browserToolRouter.routeToBrowser(deps.hubAgentId, name, input);

@@ -264,7 +264,7 @@ describe('sw.ts cache strategies and message handlers', () => {
       expect(mockCache.add).toHaveBeenCalledWith('/');
     });
 
-    it('should call self.skipWaiting() on install for immediate activation', async () => {
+    it('should NOT call self.skipWaiting() on install (updates require user action)', async () => {
       const { skipWaiting } = await loadSW();
 
       const installEvent = {
@@ -273,7 +273,7 @@ describe('sw.ts cache strategies and message handlers', () => {
 
       installHandler!(installEvent);
 
-      expect(skipWaiting).toHaveBeenCalled();
+      expect(skipWaiting).not.toHaveBeenCalled();
     });
   });
 

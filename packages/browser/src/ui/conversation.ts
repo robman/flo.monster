@@ -115,6 +115,10 @@ export class ConversationView {
       this.addUserMessage((event as any).content);
       return;
     }
+    if (eventType === 'budget_exceeded') {
+      this.showBudgetExceeded((event as any).reason, (event as any).message);
+      return;
+    }
 
     switch (event.type) {
       case 'message_start':
@@ -251,6 +255,14 @@ export class ConversationView {
       resultEl.textContent = content;
       body.appendChild(resultEl);
     }
+    this.scrollToBottom();
+  }
+
+  private showBudgetExceeded(reason: string, message: string): void {
+    const el = document.createElement('div');
+    el.className = 'message message--budget-exceeded';
+    el.textContent = message || `Budget exceeded (${reason})`;
+    this.messagesEl.appendChild(el);
     this.scrollToBottom();
   }
 

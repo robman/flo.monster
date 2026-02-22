@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { calculateCost } from '../cost-utils.js';
+import { calculateCost, estimateCostForModel } from '../cost-utils.js';
+import { MODEL_PRICING } from '../../data/model-pricing.js';
 import type { TokenUsage } from '../../types/messages.js';
 import type { ModelInfo } from '../../types/provider.js';
 
@@ -109,5 +110,50 @@ describe('calculateCost', () => {
     const usage: TokenUsage = { input_tokens: 0, output_tokens: 0 };
     const cost = calculateCost(usage, basicPricing);
     expect(cost.currency).toBe('USD');
+  });
+});
+
+describe('estimateCostForModel', () => {
+  it('calculates cost using centralized model pricing', () => {
+    const usage: TokenUsage = { input_tokens: 1_000_000, output_tokens: 100_000 };
+    const cost = estimateCostForModel('claude-sonnet-4-6', usage);
+    // Sonnet 4.6: $3/MTok input, $15/MTok output
+    expect(cost.inputCost).toBeCloseTo(3.0);
+    expect(cost.outputCost).toBeCloseTo(1.5);
+    expect(cost.totalCost).toBeCloseTo(4.5);
+  });
+
+  it('returns zero cost for unknown models', () => {
+    const usage: TokenUsage = { input_tokens: 1000, output_tokens: 500 };
+    const cost = estimateCostForModel('unknown-model', usage);
+    expect(cost.totalCost).toBe(0);
+  });
+
+  it('resolves model aliases', () => {
+    // claude-sonnet-4-5-20251101 aliases to claude-sonnet-4-5-20250929
+    const usage: TokenUsage = { input_tokens: 1_000_000, output_tokens: 0 };
+    const cost = estimateCostForModel('claude-sonnet-4-5-20251101', usage);
+    expect(cost.inputCost).toBeCloseTo(3.0); // Sonnet 4.5: $3/MTok input
+  });
+});
+
+describe('MODEL_PRICING validation', () => {
+  it('has all required fields for every model', () => {
+    for (const [id, model] of Object.entries(MODEL_PRICING)) {
+      expect(model.id).toBe(id);
+      expect(model.displayName).toBeTruthy();
+      expect(model.provider).toBeTruthy();
+      expect(model.contextWindow).toBeGreaterThan(0);
+      expect(model.maxOutputTokens).toBeGreaterThan(0);
+      expect(model.pricing.inputPerMillion).toBeGreaterThan(0);
+      expect(model.pricing.outputPerMillion).toBeGreaterThan(0);
+    }
+  });
+
+  it('has models for all three providers', () => {
+    const providers = new Set(Object.values(MODEL_PRICING).map(m => m.provider));
+    expect(providers.has('anthropic')).toBe(true);
+    expect(providers.has('openai')).toBe(true);
+    expect(providers.has('gemini')).toBe(true);
   });
 });

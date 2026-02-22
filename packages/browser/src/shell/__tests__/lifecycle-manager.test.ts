@@ -511,7 +511,7 @@ describe('LifecycleManager — auto-save and dirty tracking', () => {
       return visibilityCall[1] as () => void;
     }
 
-    it('calls hubClient.suspend() on visibilitychange to hidden', async () => {
+    it('does not call hubClient.suspend() on non-iOS (desktop)', async () => {
       const hubClient = {
         sendDomStateUpdate: vi.fn(),
         suspend: vi.fn(),
@@ -529,11 +529,11 @@ describe('LifecycleManager — auto-save and dirty tracking', () => {
 
       await handler();
 
-      expect(hubClient.suspend).toHaveBeenCalledOnce();
-      expect(hubClient.resume).not.toHaveBeenCalled();
+      // On desktop, WebSockets should NOT be suspended on tab switch
+      expect(hubClient.suspend).not.toHaveBeenCalled();
     });
 
-    it('calls hubClient.resume() on visibilitychange to visible', async () => {
+    it('does not call hubClient.resume() on non-iOS (desktop)', async () => {
       const hubClient = {
         sendDomStateUpdate: vi.fn(),
         suspend: vi.fn(),
@@ -551,8 +551,8 @@ describe('LifecycleManager — auto-save and dirty tracking', () => {
 
       await handler();
 
-      expect(hubClient.resume).toHaveBeenCalledOnce();
-      expect(hubClient.suspend).not.toHaveBeenCalled();
+      // On desktop, no resume needed since we didn't suspend
+      expect(hubClient.resume).not.toHaveBeenCalled();
     });
 
     it('does not throw when hubClient has no suspend method', async () => {

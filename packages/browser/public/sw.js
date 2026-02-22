@@ -433,7 +433,8 @@ self.addEventListener('install', (event) => {
       ))
     )
   );
-  self.skipWaiting();
+  // Do NOT call self.skipWaiting() here — updates should wait for user action
+  // via the update banner. The 'skip_waiting' message handler is the user-initiated path.
 });
 
 self.addEventListener('activate', (event) => {

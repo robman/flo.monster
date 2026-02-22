@@ -507,7 +507,7 @@ export async function handleMessage(
   // Handle subscribe_agent
   if (message.type === 'subscribe_agent') {
     const subMsg = message as SubscribeAgentMessage;
-    handleSubscribeAgent(client, subMsg, agents);
+    handleSubscribeAgent(client, subMsg, agents, agentStorePath);
     return;
   }
 
@@ -549,7 +549,7 @@ export async function handleMessage(
 
   // Handle dom_state_update
   if (message.type === 'dom_state_update') {
-    handleDomStateUpdate(client, message as any, agents, agentStore, clients);
+    handleDomStateUpdate(client, message as any, agents, agentStore, clients, agentStorePath);
     return;
   }
 

@@ -465,14 +465,15 @@ describe('IndexedDBProvider', () => {
       expect(file?.content).toBe('nested');
     });
 
-    it('should skip context.json at root', async () => {
+    it('should include context.json at root', async () => {
       await provider.writeFile(testAgentId, 'context.json', '[]');
       await provider.writeFile(testAgentId, 'other.txt', 'content');
 
       const files = await provider.exportFiles(testAgentId);
 
-      expect(files).toHaveLength(1);
-      expect(files[0].path).toBe('other.txt');
+      expect(files).toHaveLength(2);
+      const paths = files.map(f => f.path).sort();
+      expect(paths).toEqual(['context.json', 'other.txt']);
     });
 
     it('should not skip context.json in subdirectories', async () => {

@@ -1,18 +1,16 @@
 import type { ProviderAdapter, ModelInfo } from '../types/provider.js';
-import { createAnthropicAdapter, MODEL_INFO as ANTHROPIC_MODELS } from './anthropic.js';
-import { createOpenAIChatAdapter, OPENAI_MODELS } from './openai.js';
-import { createGeminiAdapter, GEMINI_MODELS } from './gemini.js';
+import { MODEL_PRICING } from '../data/model-pricing.js';
+import { createAnthropicAdapter } from './anthropic.js';
+import { createOpenAIChatAdapter } from './openai.js';
+import { createGeminiAdapter } from './gemini.js';
 export { MODEL_ALIASES, resolveModelId } from './model-aliases.js';
 import { resolveModelId } from './model-aliases.js';
 
 /**
  * Combined model registry across all providers.
+ * Single source of truth — loaded from data/model-pricing.ts.
  */
-export const ALL_MODELS: Record<string, ModelInfo> = {
-  ...ANTHROPIC_MODELS,
-  ...OPENAI_MODELS,
-  ...GEMINI_MODELS,
-};
+export const ALL_MODELS: Record<string, ModelInfo> = MODEL_PRICING;
 
 /**
  * Get all models for a specific provider.

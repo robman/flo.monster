@@ -3,11 +3,16 @@ import type { PersistenceLayer } from './persistence.js';
 import type { HookManager } from './hook-manager.js';
 import type { DirtyTracker } from './dirty-tracker.js';
 import type { PersistHandler } from './persist-handler.js';
-import type { CostTracker, SerializedDomState } from '@flo-monster/core';
+import type { CostTracker, SerializedDomState, TokenUsage } from '@flo-monster/core';
 import type { AgentContainer } from '../agent/agent-container.js';
 import { getStorageProvider } from '../storage/agent-storage.js';
+import { triggerVersionCheck } from './sw-registration.js';
 
 const DEFAULT_MODEL = 'claude-sonnet-4-6';
+
+/** Detect iOS (Safari, Chrome on iOS, etc.) where BFCache requires WebSocket cleanup. */
+const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+  (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 
 export interface LifecycleManagerDeps {
   agentManager: AgentManager;
@@ -61,10 +66,13 @@ export class LifecycleManager {
         // Report visibility state to hub for push notification routing
         this.sendVisibilityToHub(false);
 
-        // Suspend hub WebSocket connections FIRST (synchronous, before any async work).
+        // On iOS, suspend hub WebSocket connections FIRST (synchronous, before any async work).
         // iOS may freeze/terminate the process during async operations — WebSockets
-        // must be closed before that happens or the page won't survive.
-        this.deps.hubClient?.suspend?.();
+        // must be closed before that happens or the page won't survive BFCache.
+        // On desktop, WebSockets survive tab switches fine — don't disconnect.
+        if (isIOS) {
+          this.deps.hubClient?.suspend?.();
+        }
 
         // Synchronous localStorage backup (survives page teardown)
         this.saveAgentRegistryToLocalStorage();
@@ -83,12 +91,24 @@ export class LifecycleManager {
 
         console.log(`[flo:save] visibilitychange=hidden — save complete`);
       } else if (document.visibilityState === 'visible') {
-        // Resume suspended hub connections
-        this.deps.hubClient?.resume?.();
+        if (isIOS) {
+          // Resume suspended hub connections (only suspended on iOS)
+          this.deps.hubClient?.resume?.();
+        }
+
+        // Check for app/SW updates on every foreground return.
+        // SPA has no navigations after initial load, so the SW's piggyback
+        // check never fires again. triggerVersionCheck is hourly-throttled
+        // in the SW; browsers throttle reg.update() to ~1/min.
+        triggerVersionCheck();
+        navigator.serviceWorker?.getRegistration().then(reg => {
+          reg?.update().catch(() => {});
+        });
 
         // Report visibility state to hub for push notification routing
-        // (deferred slightly to let WebSocket reconnect first)
-        setTimeout(() => this.sendVisibilityToHub(true), 500);
+        // (deferred slightly on iOS to let WebSocket reconnect first)
+        const delay = isIOS ? 500 : 0;
+        setTimeout(() => this.sendVisibilityToHub(true), delay);
       }
     });
 
@@ -184,14 +204,19 @@ export class LifecycleManager {
         console.log('[flo] No agents to save');
       }
 
-      // Also save global usage for cost display restoration
+      // Save per-agent usage for cost display restoration
       const costTracker = this.deps.getCostTracker();
       if (costTracker) {
-        const usage = costTracker.getTotalUsage();
+        const perAgentUsage = costTracker.getPerAgentUsage();
+        const usageData: Record<string, { model: string; usage: TokenUsage }> = {};
+        for (const [id, entry] of perAgentUsage) {
+          usageData[id] = { model: entry.model, usage: entry.usage };
+        }
         const settings = await this.deps.persistence.getSettings();
-        settings.globalUsage = usage;
+        settings.perAgentUsage = usageData;
+        delete settings.globalUsage; // Clean up legacy field
         await this.deps.persistence.saveSettings(settings);
-        console.log(`[flo] Saved global usage: ${usage.input_tokens} in / ${usage.output_tokens} out`);
+        console.log(`[flo] Saved per-agent usage for ${Object.keys(usageData).length} agent(s)`);
       }
     } catch (err) {
       console.warn('[flo] Failed to save agent registry:', err);
@@ -271,12 +296,17 @@ export class LifecycleManager {
         });
       }
 
-      // Also save global usage (fire-and-forget)
+      // Save per-agent usage (fire-and-forget)
       const costTracker = this.deps.getCostTracker();
       if (costTracker) {
-        const usage = costTracker.getTotalUsage();
+        const perAgentUsage = costTracker.getPerAgentUsage();
+        const usageData: Record<string, { model: string; usage: { input_tokens: number; output_tokens: number; cache_creation_input_tokens?: number; cache_read_input_tokens?: number } }> = {};
+        for (const [id, entry] of perAgentUsage) {
+          usageData[id] = { model: entry.model, usage: entry.usage };
+        }
         this.deps.persistence.getSettings().then(settings => {
-          settings.globalUsage = usage;
+          settings.perAgentUsage = usageData;
+          delete settings.globalUsage;
           return this.deps.persistence.saveSettings(settings);
         }).catch(() => {
           // Ignore errors
@@ -410,18 +440,25 @@ export class LifecycleManager {
     LifecycleManager.clearAgentRegistryLocalStorage();
     console.log(`[flo:restore] restoreAgents: registry cleared (IDB + localStorage)`);
 
-    // Restore global cost display from persisted usage
+    // Restore per-agent usage from persisted data
     try {
       const settings = await this.deps.persistence.getSettings();
       const costTracker = this.deps.getCostTracker();
-      if (settings.globalUsage && costTracker) {
-        console.log(`[flo] Restoring global usage: ${settings.globalUsage.input_tokens} in / ${settings.globalUsage.output_tokens} out`);
-        costTracker.addUsage(DEFAULT_MODEL, settings.globalUsage);
-      } else {
-        console.log('[flo] No global usage to restore', { hasUsage: !!settings.globalUsage, hasTracker: !!costTracker });
+      if (costTracker) {
+        if (settings.perAgentUsage) {
+          const entries = Object.entries(settings.perAgentUsage as Record<string, { model: string; usage: TokenUsage }>);
+          for (const [agentId, entry] of entries) {
+            costTracker.setAgentUsage(agentId, entry.model, entry.usage);
+          }
+          console.log(`[flo] Restored per-agent usage for ${entries.length} agent(s)`);
+        } else if (settings.globalUsage) {
+          // Legacy fallback: restore old-style global usage
+          costTracker.addUsage(DEFAULT_MODEL, settings.globalUsage);
+          console.log(`[flo] Restored legacy global usage: ${settings.globalUsage.input_tokens} in / ${settings.globalUsage.output_tokens} out`);
+        }
       }
     } catch (err) {
-      console.warn('[flo] Failed to restore global usage:', err);
+      console.warn('[flo] Failed to restore usage:', err);
     }
 
     return { lastActiveAgentId, agentsToAutoStart };

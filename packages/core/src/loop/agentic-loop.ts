@@ -145,6 +145,7 @@ export async function runAgenticLoop(
     let assistantContent: ContentBlock[] = [];
     let stopReason: string = 'end_turn';
     const toolCalls: ToolUseContent[] = [];
+    let callUsage: TokenUsage = { input_tokens: 0, output_tokens: 0 };
 
     try {
       for await (const chunk of deps.sendApiRequest(body, headers, url)) {
@@ -153,16 +154,29 @@ export async function runAgenticLoop(
           const agentEvents = deps.adapter.parseSSEEvent(sseEvent);
           for (const event of agentEvents) {
             if (event.type === 'usage') {
-              // Accumulate usage, emit only cumulative with cost
-              totalUsage = accumulateUsage(totalUsage, event.usage);
-              const cost = deps.adapter.estimateCost(config.model, totalUsage);
-              deps.emit({ type: 'usage', usage: { ...totalUsage }, cost });
+              // Per-call usage: take max of each field (handles multiple usage events per call)
+              callUsage = {
+                input_tokens: Math.max(callUsage.input_tokens, event.usage.input_tokens),
+                output_tokens: Math.max(callUsage.output_tokens, event.usage.output_tokens),
+                cache_creation_input_tokens:
+                  (callUsage.cache_creation_input_tokens !== undefined || event.usage.cache_creation_input_tokens !== undefined)
+                    ? Math.max(callUsage.cache_creation_input_tokens ?? 0, event.usage.cache_creation_input_tokens ?? 0)
+                    : undefined,
+                cache_read_input_tokens:
+                  (callUsage.cache_read_input_tokens !== undefined || event.usage.cache_read_input_tokens !== undefined)
+                    ? Math.max(callUsage.cache_read_input_tokens ?? 0, event.usage.cache_read_input_tokens ?? 0)
+                    : undefined,
+              };
+              // Total = previous calls + current call
+              const currentTotal = accumulateUsage(totalUsage, callUsage);
+              const cost = deps.adapter.estimateCost(config.model, currentTotal);
+              deps.emit({ type: 'usage', usage: { ...currentTotal }, cost });
               // Check token budget
-              if (config.tokenBudget && (totalUsage.input_tokens + totalUsage.output_tokens) > config.tokenBudget) {
+              if (config.tokenBudget && (currentTotal.input_tokens + currentTotal.output_tokens) > config.tokenBudget) {
                 deps.emit({
                   type: 'budget_exceeded',
                   reason: 'token_limit',
-                  message: `Token budget exceeded: ${totalUsage.input_tokens + totalUsage.output_tokens} > ${config.tokenBudget}`,
+                  message: `Token budget exceeded: ${currentTotal.input_tokens + currentTotal.output_tokens} > ${config.tokenBudget}`,
                 });
                 return messages;
               }
@@ -204,6 +218,9 @@ export async function runAgenticLoop(
       deps.emit({ type: 'error', error: String(err) });
       return messages;
     }
+
+    // Finalize this call's usage into the running total
+    totalUsage = accumulateUsage(totalUsage, callUsage);
 
     // Fallback: detect tool calls output as text (some models like Gemini
     // fall back to text-based tool calls despite proper function calling setup).

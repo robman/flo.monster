@@ -471,11 +471,6 @@ export class IndexedDBProvider implements AgentStorageProvider {
         continue;
       }
 
-      // Skip context.json at root
-      if (entry.path === 'context.json') {
-        continue;
-      }
-
       if (!entry.content || entry.content.byteLength === 0) {
         // Empty file
         result.push({

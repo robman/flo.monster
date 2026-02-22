@@ -814,9 +814,13 @@ describe('Gemini Adapter', () => {
       }
     });
 
-    it('emits usage event from usageMetadata', () => {
+    it('emits usage event from usageMetadata when finishReason is present', () => {
       const event: SSEEvent = {
         data: JSON.stringify({
+          candidates: [{
+            content: { parts: [{ text: 'Done.' }] },
+            finishReason: 'STOP',
+          }],
           usageMetadata: {
             promptTokenCount: 150,
             candidatesTokenCount: 42,
@@ -824,17 +828,73 @@ describe('Gemini Adapter', () => {
         }),
       };
       const events = adapter.parseSSEEvent(event);
-      expect(events).toHaveLength(1);
-      expect(events[0].type).toBe('usage');
-      if (events[0].type === 'usage') {
-        expect(events[0].usage.input_tokens).toBe(150);
-        expect(events[0].usage.output_tokens).toBe(42);
-        expect(events[0].cost).toEqual({
+      const usageEvents = events.filter(e => e.type === 'usage');
+      expect(usageEvents).toHaveLength(1);
+      if (usageEvents[0].type === 'usage') {
+        expect(usageEvents[0].usage.input_tokens).toBe(150);
+        expect(usageEvents[0].usage.output_tokens).toBe(42);
+        expect(usageEvents[0].cost).toEqual({
           inputCost: 0,
           outputCost: 0,
           totalCost: 0,
           currency: 'USD',
         });
+      }
+    });
+
+    it('does not emit usage without finishReason', () => {
+      const event: SSEEvent = {
+        data: JSON.stringify({
+          candidates: [{
+            content: { parts: [{ text: 'Partial...' }] },
+          }],
+          usageMetadata: {
+            promptTokenCount: 100,
+            candidatesTokenCount: 20,
+          },
+        }),
+      };
+      const events = adapter.parseSSEEvent(event);
+      const usageEvents = events.filter(e => e.type === 'usage');
+      expect(usageEvents).toHaveLength(0);
+    });
+
+    it('emits single usage event when usageMetadata appears in multiple chunks', () => {
+      // Chunk 1: usageMetadata with partial counts, no finishReason
+      const chunk1: SSEEvent = {
+        data: JSON.stringify({
+          candidates: [{
+            content: { parts: [{ text: 'Hello' }] },
+          }],
+          usageMetadata: {
+            promptTokenCount: 100,
+            candidatesTokenCount: 10,
+          },
+        }),
+      };
+      // Chunk 2: usageMetadata with cumulative (higher) counts + finishReason
+      const chunk2: SSEEvent = {
+        data: JSON.stringify({
+          candidates: [{
+            content: { parts: [{ text: ' world' }] },
+            finishReason: 'STOP',
+          }],
+          usageMetadata: {
+            promptTokenCount: 100,
+            candidatesTokenCount: 42,
+          },
+        }),
+      };
+
+      const events1 = adapter.parseSSEEvent(chunk1);
+      const events2 = adapter.parseSSEEvent(chunk2);
+
+      const allEvents = [...events1, ...events2];
+      const usageEvents = allEvents.filter(e => e.type === 'usage');
+      expect(usageEvents).toHaveLength(1);
+      if (usageEvents[0].type === 'usage') {
+        expect(usageEvents[0].usage.input_tokens).toBe(100);
+        expect(usageEvents[0].usage.output_tokens).toBe(42);
       }
     });
 
@@ -1011,16 +1071,15 @@ describe('Gemini Adapter', () => {
       }
     });
 
-    it('handles no candidates in response', () => {
+    it('handles no candidates in response (usage accumulated but not emitted)', () => {
       const event: SSEEvent = {
         data: JSON.stringify({
           usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 0 },
         }),
       };
       const events = adapter.parseSSEEvent(event);
-      // Only usage event
-      expect(events).toHaveLength(1);
-      expect(events[0].type).toBe('usage');
+      // No usage event without finishReason
+      expect(events).toHaveLength(0);
     });
 
     it('handles candidates with no content', () => {

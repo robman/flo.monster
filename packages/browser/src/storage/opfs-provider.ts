@@ -426,7 +426,7 @@ export class OPFSProvider implements AgentStorageProvider {
     try {
       const agentDir = await this.getAgentDir(agentId, false);
       const files: SerializedFile[] = [];
-      await this.collectFiles(agentDir, '', files, true);
+      await this.collectFiles(agentDir, '', files);
       return files;
     } catch (e) {
       if (e instanceof StorageError && e.code === 'NOT_FOUND') {

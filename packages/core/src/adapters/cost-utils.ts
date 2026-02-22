@@ -1,5 +1,7 @@
 import type { TokenUsage } from '../types/messages.js';
 import type { CostEstimate, ModelInfo } from '../types/provider.js';
+import { MODEL_PRICING } from '../data/model-pricing.js';
+import { resolveModelId } from './model-aliases.js';
 
 /**
  * Calculate the cost of a request from token usage and model pricing.
@@ -30,4 +32,14 @@ export function calculateCost(
     totalCost: inputCost + outputCost + cacheCost,
     currency: 'USD',
   };
+}
+
+/**
+ * Estimate cost for a model by ID, using the centralized pricing registry.
+ * Resolves model aliases automatically.
+ */
+export function estimateCostForModel(modelId: string, usage: TokenUsage): CostEstimate {
+  const info = MODEL_PRICING[resolveModelId(modelId)];
+  if (!info) return { inputCost: 0, outputCost: 0, totalCost: 0, currency: 'USD' };
+  return calculateCost(usage, info.pricing);
 }

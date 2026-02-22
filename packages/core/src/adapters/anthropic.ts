@@ -5,82 +5,13 @@ import type {
 import type { AgentConfig } from '../types/agent.js';
 import type { AgentEvent } from '../types/events.js';
 import type { ProviderAdapter, CostEstimate, SSEEvent, ModelInfo } from '../types/provider.js';
-import { calculateCost } from './cost-utils.js';
-import { resolveModelId } from './model-aliases.js';
+import { estimateCostForModel } from './cost-utils.js';
+import { MODEL_PRICING } from '../data/model-pricing.js';
 
-// Model pricing (per million tokens)
-// Order matters — UI model selectors display models in insertion order.
-// Sonnet is the recommended default, so it goes first.
-const MODEL_INFO: Record<string, ModelInfo> = {
-  // Claude 4.6 series (current generation)
-  'claude-sonnet-4-6': {
-    id: 'claude-sonnet-4-6',
-    displayName: 'Claude Sonnet 4.6',
-    provider: 'anthropic',
-    contextWindow: 200000,
-    maxOutputTokens: 65536,
-    pricing: { inputPerMillion: 3.0, outputPerMillion: 15.0, cacheCreationPerMillion: 3.75, cacheReadPerMillion: 0.3 },
-  },
-  'claude-opus-4-6': {
-    id: 'claude-opus-4-6',
-    displayName: 'Claude Opus 4.6',
-    provider: 'anthropic',
-    contextWindow: 200000,
-    maxOutputTokens: 131072,
-    pricing: { inputPerMillion: 5.0, outputPerMillion: 25.0, cacheCreationPerMillion: 6.25, cacheReadPerMillion: 0.5 },
-  },
-  // Claude 4.5 series
-  'claude-opus-4-5-20251101': {
-    id: 'claude-opus-4-5-20251101',
-    displayName: 'Claude Opus 4.5',
-    provider: 'anthropic',
-    contextWindow: 200000,
-    maxOutputTokens: 65536,
-    pricing: { inputPerMillion: 5.0, outputPerMillion: 25.0, cacheCreationPerMillion: 6.25, cacheReadPerMillion: 0.5 },
-  },
-  'claude-sonnet-4-5-20250929': {
-    id: 'claude-sonnet-4-5-20250929',
-    displayName: 'Claude Sonnet 4.5',
-    provider: 'anthropic',
-    contextWindow: 200000,
-    maxOutputTokens: 65536,
-    pricing: { inputPerMillion: 3.0, outputPerMillion: 15.0, cacheCreationPerMillion: 3.75, cacheReadPerMillion: 0.3 },
-  },
-  'claude-haiku-4-5-20251001': {
-    id: 'claude-haiku-4-5-20251001',
-    displayName: 'Claude Haiku 4.5',
-    provider: 'anthropic',
-    contextWindow: 200000,
-    maxOutputTokens: 65536,
-    pricing: { inputPerMillion: 1.0, outputPerMillion: 5.0, cacheCreationPerMillion: 1.25, cacheReadPerMillion: 0.1 },
-  },
-  // Claude 4 series
-  'claude-sonnet-4-20250514': {
-    id: 'claude-sonnet-4-20250514',
-    displayName: 'Claude Sonnet 4',
-    provider: 'anthropic',
-    contextWindow: 200000,
-    maxOutputTokens: 65536,
-    pricing: { inputPerMillion: 3.0, outputPerMillion: 15.0, cacheCreationPerMillion: 3.75, cacheReadPerMillion: 0.3 },
-  },
-  'claude-opus-4-20250514': {
-    id: 'claude-opus-4-20250514',
-    displayName: 'Claude Opus 4',
-    provider: 'anthropic',
-    contextWindow: 200000,
-    maxOutputTokens: 32768,
-    pricing: { inputPerMillion: 15.0, outputPerMillion: 75.0, cacheCreationPerMillion: 18.75, cacheReadPerMillion: 1.5 },
-  },
-  // Claude 3.5 series (legacy)
-  'claude-haiku-3-5-20241022': {
-    id: 'claude-haiku-3-5-20241022',
-    displayName: 'Claude 3.5 Haiku',
-    provider: 'anthropic',
-    contextWindow: 200000,
-    maxOutputTokens: 8192,
-    pricing: { inputPerMillion: 0.80, outputPerMillion: 4.0, cacheCreationPerMillion: 1.0, cacheReadPerMillion: 0.08 },
-  },
-};
+// Backward-compatible export — derived from centralized model-pricing
+const MODEL_INFO: Record<string, ModelInfo> = Object.fromEntries(
+  Object.entries(MODEL_PRICING).filter(([, m]) => m.provider === 'anthropic')
+);
 
 // State for accumulating streamed content
 interface StreamState {
@@ -88,6 +19,8 @@ interface StreamState {
   currentToolName: string | null;
   toolInputAccumulator: string;
   currentTextAccumulator: string;
+  // Per-API-call usage (merged across message_start and message_delta)
+  callUsage: TokenUsage;
 }
 
 function createStreamState(): StreamState {
@@ -96,6 +29,7 @@ function createStreamState(): StreamState {
     currentToolName: null,
     toolInputAccumulator: '',
     currentTextAccumulator: '',
+    callUsage: { input_tokens: 0, output_tokens: 0 },
   };
 }
 
@@ -170,17 +104,23 @@ export function createAnthropicAdapter(): ProviderAdapter {
         case 'message_start': {
           const message = p.message as Record<string, unknown> | undefined;
           events.push({ type: 'message_start', messageId: (message?.id as string) || '' });
-          // Capture input token usage from message_start
+          // Save per-call usage — will be emitted at message_delta
           const msgUsage = message?.usage as Record<string, unknown> | undefined;
           if (msgUsage) {
-            events.push({
-              type: 'usage',
-              usage: {
-                input_tokens: (msgUsage.input_tokens as number) || 0,
-                output_tokens: (msgUsage.output_tokens as number) || 0,
-              },
-              cost: { inputCost: 0, outputCost: 0, totalCost: 0, currency: 'USD' },
-            });
+            streamState.callUsage.input_tokens = Math.max(streamState.callUsage.input_tokens, (msgUsage.input_tokens as number) || 0);
+            streamState.callUsage.output_tokens = Math.max(streamState.callUsage.output_tokens, (msgUsage.output_tokens as number) || 0);
+            if (msgUsage.cache_creation_input_tokens) {
+              streamState.callUsage.cache_creation_input_tokens = Math.max(
+                streamState.callUsage.cache_creation_input_tokens ?? 0,
+                msgUsage.cache_creation_input_tokens as number
+              );
+            }
+            if (msgUsage.cache_read_input_tokens) {
+              streamState.callUsage.cache_read_input_tokens = Math.max(
+                streamState.callUsage.cache_read_input_tokens ?? 0,
+                msgUsage.cache_read_input_tokens as number
+              );
+            }
           }
           break;
         }
@@ -248,15 +188,27 @@ export function createAnthropicAdapter(): ProviderAdapter {
         case 'message_delta': {
           const usage = p.usage as Record<string, unknown> | undefined;
           if (usage) {
-            events.push({
-              type: 'usage',
-              usage: {
-                input_tokens: (usage.input_tokens as number) || 0,
-                output_tokens: (usage.output_tokens as number) || 0,
-              },
-              cost: { inputCost: 0, outputCost: 0, totalCost: 0, currency: 'USD' },
-            });
+            streamState.callUsage.input_tokens = Math.max(streamState.callUsage.input_tokens, (usage.input_tokens as number) || 0);
+            streamState.callUsage.output_tokens = Math.max(streamState.callUsage.output_tokens, (usage.output_tokens as number) || 0);
+            if (usage.cache_creation_input_tokens) {
+              streamState.callUsage.cache_creation_input_tokens = Math.max(
+                streamState.callUsage.cache_creation_input_tokens ?? 0,
+                usage.cache_creation_input_tokens as number
+              );
+            }
+            if (usage.cache_read_input_tokens) {
+              streamState.callUsage.cache_read_input_tokens = Math.max(
+                streamState.callUsage.cache_read_input_tokens ?? 0,
+                usage.cache_read_input_tokens as number
+              );
+            }
           }
+          // Always emit merged per-call usage at message_delta (end of stream)
+          events.push({
+            type: 'usage',
+            usage: { ...streamState.callUsage },
+            cost: { inputCost: 0, outputCost: 0, totalCost: 0, currency: 'USD' },
+          });
           const delta = p.delta as Record<string, unknown> | undefined;
           if (delta?.stop_reason) {
             events.push({
@@ -287,12 +239,7 @@ export function createAnthropicAdapter(): ProviderAdapter {
     },
 
     estimateCost(model: string, usage: TokenUsage): CostEstimate {
-      const info = MODEL_INFO[resolveModelId(model)];
-      if (!info) {
-        return { inputCost: 0, outputCost: 0, totalCost: 0, currency: 'USD' };
-      }
-
-      return calculateCost(usage, info.pricing);
+      return estimateCostForModel(model, usage);
     },
 
     resetState(): void {

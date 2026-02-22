@@ -98,6 +98,10 @@
     var currentToolName = null;
     var toolInputAccum = '';
     var textAccum = '';
+    var callInputTokens = 0;
+    var callOutputTokens = 0;
+    var callCacheCreation = 0;
+    var callCacheRead = 0;
 
     return {
       mapSSEEvent: function(sseEvent) {
@@ -108,13 +112,19 @@
 
         switch (parsed.type) {
           case 'message_start':
+            // Reset per-call usage for this new API response
+            callInputTokens = 0;
+            callOutputTokens = 0;
+            callCacheCreation = 0;
+            callCacheRead = 0;
             events.push({ type: 'message_start', messageId: (parsed.message && parsed.message.id) || '' });
             if (parsed.message && parsed.message.usage) {
-              events.push({
-                type: 'usage',
-                usage: { input_tokens: parsed.message.usage.input_tokens || 0, output_tokens: parsed.message.usage.output_tokens || 0 },
-                cost: { inputCost: 0, outputCost: 0, totalCost: 0, currency: 'USD' }
-              });
+              // Save per-call usage — will be emitted at message_delta
+              var msu = parsed.message.usage;
+              callInputTokens = msu.input_tokens || 0;
+              callOutputTokens = msu.output_tokens || 0;
+              if (msu.cache_creation_input_tokens) callCacheCreation = msu.cache_creation_input_tokens;
+              if (msu.cache_read_input_tokens) callCacheRead = msu.cache_read_input_tokens;
             }
             break;
 
@@ -157,12 +167,22 @@
 
           case 'message_delta':
             if (parsed.usage) {
-              events.push({
-                type: 'usage',
-                usage: { input_tokens: parsed.usage.input_tokens || 0, output_tokens: parsed.usage.output_tokens || 0 },
-                cost: { inputCost: 0, outputCost: 0, totalCost: 0, currency: 'USD' }
-              });
+              callInputTokens = Math.max(callInputTokens, parsed.usage.input_tokens || 0);
+              callOutputTokens = Math.max(callOutputTokens, parsed.usage.output_tokens || 0);
+              if (parsed.usage.cache_creation_input_tokens) callCacheCreation = Math.max(callCacheCreation, parsed.usage.cache_creation_input_tokens);
+              if (parsed.usage.cache_read_input_tokens) callCacheRead = Math.max(callCacheRead, parsed.usage.cache_read_input_tokens);
             }
+            // Emit single merged usage for this API call
+            events.push({
+              type: 'usage',
+              usage: {
+                input_tokens: callInputTokens,
+                output_tokens: callOutputTokens,
+                cache_creation_input_tokens: callCacheCreation || undefined,
+                cache_read_input_tokens: callCacheRead || undefined
+              },
+              cost: { inputCost: 0, outputCost: 0, totalCost: 0, currency: 'USD' }
+            });
             if (parsed.delta && parsed.delta.stop_reason) {
               // If max_tokens truncated a tool call in progress, flush it as an error
               if (parsed.delta.stop_reason === 'max_tokens' && currentToolId) {
@@ -186,6 +206,10 @@
         currentToolName = null;
         toolInputAccum = '';
         textAccum = '';
+        callInputTokens = 0;
+        callOutputTokens = 0;
+        callCacheCreation = 0;
+        callCacheRead = 0;
       }
     };
   }
@@ -316,6 +340,8 @@
     var textAccum = '';
     var hasText = false;
     var hadToolCalls = false;  // Stateful across chunks — Gemini can split functionCall and finishReason into separate chunks
+    var callInputTokens = 0;
+    var callOutputTokens = 0;
 
     function flushText(events) {
       if (hasText && textAccum) {
@@ -392,16 +418,26 @@
           }
         }
 
-        // Usage metadata
+        // Usage metadata — accumulate with Math.max (Gemini sends cumulative values)
         if (parsed.usageMetadata) {
-          events.push({
-            type: 'usage',
-            usage: {
-              input_tokens: parsed.usageMetadata.promptTokenCount || 0,
-              output_tokens: parsed.usageMetadata.candidatesTokenCount || 0
-            },
-            cost: { inputCost: 0, outputCost: 0, totalCost: 0, currency: 'USD' }
-          });
+          callInputTokens = Math.max(callInputTokens, parsed.usageMetadata.promptTokenCount || 0);
+          callOutputTokens = Math.max(callOutputTokens, parsed.usageMetadata.candidatesTokenCount || 0);
+        }
+
+        // Emit single usage event on finish (after usageMetadata accumulation)
+        if (candidates && candidates.length > 0 && candidates[0].finishReason) {
+          if (callInputTokens > 0 || callOutputTokens > 0) {
+            events.push({
+              type: 'usage',
+              usage: {
+                input_tokens: callInputTokens,
+                output_tokens: callOutputTokens
+              },
+              cost: { inputCost: 0, outputCost: 0, totalCost: 0, currency: 'USD' }
+            });
+            callInputTokens = 0;
+            callOutputTokens = 0;
+          }
         }
 
         return events;
@@ -411,6 +447,8 @@
         textAccum = '';
         hasText = false;
         hadToolCalls = false;
+        callInputTokens = 0;
+        callOutputTokens = 0;
       }
     };
   }
@@ -1160,6 +1198,8 @@
     var iterationCount = 0;
     var cumulativeInputTokens = 0;
     var cumulativeOutputTokens = 0;
+    var cumulativeCacheCreation = 0;
+    var cumulativeCacheRead = 0;
 
     try {
     while (running) {
@@ -1243,16 +1283,33 @@
             var agentEvents = mapper.mapSSEEvent(sseEvents[i]);
             for (var j = 0; j < agentEvents.length; j++) {
               var event = agentEvents[j];
-              emitEvent(event);
-
               if (event.type === 'usage') {
                 cumulativeInputTokens += (event.usage.input_tokens || 0);
                 cumulativeOutputTokens += (event.usage.output_tokens || 0);
+                if (event.usage.cache_creation_input_tokens) {
+                  cumulativeCacheCreation += event.usage.cache_creation_input_tokens;
+                }
+                if (event.usage.cache_read_input_tokens) {
+                  cumulativeCacheRead += event.usage.cache_read_input_tokens;
+                }
+                // Emit cumulative usage (not raw delta)
+                emitEvent({
+                  type: 'usage',
+                  usage: {
+                    input_tokens: cumulativeInputTokens,
+                    output_tokens: cumulativeOutputTokens,
+                    cache_creation_input_tokens: cumulativeCacheCreation || undefined,
+                    cache_read_input_tokens: cumulativeCacheRead || undefined
+                  },
+                  cost: { inputCost: 0, outputCost: 0, totalCost: 0, currency: 'USD' }
+                });
                 // Check token budget
                 if (agentConfig.tokenBudget && (cumulativeInputTokens + cumulativeOutputTokens) > agentConfig.tokenBudget) {
                   emitEvent({ type: 'budget_exceeded', reason: 'token_limit', message: 'Token budget exceeded' });
                   return;
                 }
+              } else {
+                emitEvent(event);
               }
 
               if (event.type === 'text_done') {

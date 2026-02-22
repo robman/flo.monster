@@ -142,7 +142,11 @@ describe('createVersionSection', () => {
     const mockUpdate = vi.fn().mockResolvedValue(undefined);
     vi.stubGlobal('navigator', {
       serviceWorker: {
-        getRegistration: vi.fn().mockResolvedValue({ update: mockUpdate }),
+        getRegistration: vi.fn().mockResolvedValue({
+          update: mockUpdate,
+          waiting: null,
+          installing: null,
+        }),
       },
     });
 
@@ -151,7 +155,8 @@ describe('createVersionSection', () => {
 
     checkBtn.click();
 
-    await new Promise(resolve => setTimeout(resolve, 10));
+    // Wait for reg.update() + 500ms SW processing delay
+    await new Promise(resolve => setTimeout(resolve, 600));
 
     expect(mockUpdate).toHaveBeenCalled();
     expect(checkBtn.textContent).toBe('Up to date');
@@ -188,7 +193,11 @@ describe('createVersionSection', () => {
     const mockUpdate = vi.fn().mockResolvedValue(undefined);
     vi.stubGlobal('navigator', {
       serviceWorker: {
-        getRegistration: vi.fn().mockResolvedValue({ update: mockUpdate }),
+        getRegistration: vi.fn().mockResolvedValue({
+          update: mockUpdate,
+          waiting: null,
+          installing: null,
+        }),
       },
     });
 
@@ -197,8 +206,8 @@ describe('createVersionSection', () => {
 
     checkBtn.click();
 
-    // Let the async handler resolve
-    await vi.advanceTimersByTimeAsync(10);
+    // Let the async handler resolve (reg.update() + 500ms SW processing delay)
+    await vi.advanceTimersByTimeAsync(600);
 
     expect(checkBtn.textContent).toBe('Up to date');
 

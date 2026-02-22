@@ -73,7 +73,7 @@ describe('CostDisplay', () => {
       overBudget: true,
     }));
     const budgetEl = container.querySelectorAll('.status-bar__item')[2] as HTMLElement;
-    expect(budgetEl.style.color).toBe('var(--color-error)');
+    expect(budgetEl.className).toContain('budget--critical');
   });
 
   it('hides budget element when no budget set', () => {

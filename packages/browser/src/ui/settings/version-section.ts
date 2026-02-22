@@ -42,8 +42,16 @@ export function createVersionSection(): HTMLElement {
       const reg = await navigator.serviceWorker.getRegistration();
       if (reg) {
         await reg.update();
+        // Wait briefly for the browser to process the update check
+        await new Promise(r => setTimeout(r, 500));
+        if (reg.waiting || reg.installing) {
+          checkBtn.textContent = 'Update available!';
+        } else {
+          checkBtn.textContent = 'Up to date';
+        }
+      } else {
+        checkBtn.textContent = 'Up to date';
       }
-      checkBtn.textContent = 'Up to date';
     } catch {
       checkBtn.textContent = 'Check failed';
     }

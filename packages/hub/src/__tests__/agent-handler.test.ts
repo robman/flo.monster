@@ -906,6 +906,79 @@ describe('agent-handler', () => {
       expect(client1Messages).toHaveLength(0);
     });
 
+    it('writes _dom_state.json to files directory when agentStorePath provided', async () => {
+      const agents = new Map<string, HeadlessAgentRunner>();
+      const hubAgentId = 'hub-test-agent-1000';
+      const runner = new HeadlessAgentRunner(createMockSession());
+      await runner.start();
+      agents.set(hubAgentId, runner);
+
+      const client = createMockClient();
+      client.subscribedAgents.add(hubAgentId);
+
+      const mockDomState = {
+        viewportHtml: '<div>Persisted</div>',
+        bodyAttrs: {},
+        headHtml: '',
+        htmlAttrs: {},
+        listeners: [],
+        capturedAt: 7000,
+      };
+
+      mockWriteFile.mockClear();
+      mockMkdir.mockClear();
+
+      handleDomStateUpdate(
+        client,
+        { type: 'dom_state_update', hubAgentId, domState: mockDomState },
+        agents,
+        undefined,
+        undefined,
+        '/tmp/test-agents',
+      );
+
+      // Wait for the async dynamic import + file write
+      await vi.waitFor(() => {
+        expect(mockMkdir).toHaveBeenCalledTimes(1);
+      });
+
+      expect(mockMkdir).toHaveBeenCalledWith(
+        `/tmp/test-agents/${hubAgentId}/files`,
+        { recursive: true },
+      );
+      expect(mockWriteFile).toHaveBeenCalledWith(
+        `/tmp/test-agents/${hubAgentId}/files/_dom_state.json`,
+        JSON.stringify(mockDomState),
+        'utf-8',
+      );
+    });
+
+    it('does not write _dom_state.json when agentStorePath not provided', async () => {
+      const agents = new Map<string, HeadlessAgentRunner>();
+      const hubAgentId = 'hub-test-agent-1000';
+      const runner = new HeadlessAgentRunner(createMockSession());
+      await runner.start();
+      agents.set(hubAgentId, runner);
+
+      const client = createMockClient();
+      client.subscribedAgents.add(hubAgentId);
+
+      mockWriteFile.mockClear();
+      mockMkdir.mockClear();
+
+      handleDomStateUpdate(
+        client,
+        { type: 'dom_state_update', hubAgentId, domState: { viewportHtml: '<div>No path</div>' } },
+        agents,
+      );
+
+      // Give time for any async operations
+      await new Promise(resolve => setTimeout(resolve, 100));
+
+      expect(mockWriteFile).not.toHaveBeenCalled();
+      expect(mockMkdir).not.toHaveBeenCalled();
+    });
+
     it('ignores dom_state_update from unsubscribed client', async () => {
       const agents = new Map<string, HeadlessAgentRunner>();
       const hubAgentId = 'hub-test-agent-1000';

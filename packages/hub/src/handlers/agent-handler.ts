@@ -10,7 +10,7 @@ import type { ConnectedClient } from '../server.js';
 import type { AgentStore } from '../agent-store.js';
 import type { HubConfig } from '../config.js';
 import type { HookExecutor } from '../hook-executor.js';
-import { unpackFilesToDisk } from '../tools/hub-files.js';
+import { unpackFilesToDisk, packFilesFromDisk } from '../tools/hub-files.js';
 import { getToolDefinitions } from '../tools/index.js';
 import { scheduleToolDef } from '../tools/schedule.js';
 import { contextSearchToolDef } from '../tools/context-search.js';
@@ -108,6 +108,19 @@ export function createRunnerDeps(
     pushManager: deps.pushManager,
     runner,
     agentDataDir,
+    onFileChange: (path: string, content: string | undefined, action: 'write' | 'delete') => {
+      for (const c of deps.clients) {
+        if (c.subscribedAgents.has(hubAgentId)) {
+          sendWsMessage(c.ws, {
+            type: 'file_push',
+            hubAgentId,
+            path,
+            content,
+            action,
+          });
+        }
+      }
+    },
   });
 
   // Compute hub tool definitions to inject for the LLM
@@ -126,6 +139,7 @@ export function createRunnerDeps(
     agentStore: deps.agentStore,
     hubAgentId,
     hubToolDefs,
+    filesRoot,
   };
 }
 
@@ -338,6 +352,7 @@ export function handleSubscribeAgent(
   client: ConnectedClient,
   message: SubscribeAgentMessage,
   agents: Map<string, HeadlessAgentRunner>,
+  agentStorePath?: string,
 ): void {
   const runner = agents.get(message.agentId);
   if (!runner) {
@@ -383,6 +398,22 @@ export function handleSubscribeAgent(
       agentId: message.agentId,
       messages,
     });
+  }
+
+  // Send current files to the subscribing browser (initial sync)
+  if (agentStorePath) {
+    const filesRoot = join(agentStorePath, message.agentId, 'files');
+    packFilesFromDisk(filesRoot).then(files => {
+      for (const file of files) {
+        sendWsMessage(client.ws, {
+          type: 'file_push',
+          hubAgentId: message.agentId,
+          path: file.path,
+          content: file.content,
+          action: 'write' as const,
+        });
+      }
+    }).catch(() => {});
   }
 }
 
@@ -638,6 +669,7 @@ export function handleDomStateUpdate(
   agents: Map<string, HeadlessAgentRunner>,
   agentStore?: AgentStore,
   clients?: Set<ConnectedClient>,
+  agentStorePath?: string,
 ): void {
   // Authorization: client must be subscribed to the agent
   if (!client.subscribedAgents.has(message.hubAgentId)) return;
@@ -646,6 +678,19 @@ export function handleDomStateUpdate(
   if (!runner) return;
 
   runner.setDomState(message.domState as SerializedDomState);
+
+  // Write _dom_state.json to files directory (matches browser behavior)
+  if (agentStorePath) {
+    const filesDir = join(agentStorePath, message.hubAgentId, 'files');
+    import('node:fs/promises').then(async ({ mkdir, writeFile }) => {
+      try {
+        await mkdir(filesDir, { recursive: true });
+        await writeFile(join(filesDir, '_dom_state.json'), JSON.stringify(message.domState), 'utf-8');
+      } catch (err) {
+        console.warn('[hub] Failed to write _dom_state.json:', err);
+      }
+    });
+  }
 
   // Broadcast to other subscribed browsers (not the sender)
   if (clients) {

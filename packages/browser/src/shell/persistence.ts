@@ -36,7 +36,8 @@ export interface AppSettings {
   apiKeySource?: 'local' | 'hub';  // Which API key source to use
   hubForApiKey?: string;           // Connection ID of hub providing API key
   hasSeenHomepage?: boolean;       // Set to true after first successful credential setup
-  globalUsage?: { input_tokens: number; output_tokens: number };  // Global token usage for cost display
+  globalUsage?: { input_tokens: number; output_tokens: number };  // Legacy: global token usage (migrated to perAgentUsage)
+  perAgentUsage?: Record<string, { model: string; usage: { input_tokens: number; output_tokens: number; cache_creation_input_tokens?: number; cache_read_input_tokens?: number } }>;  // Per-agent token usage for cost display
 }
 
 export interface AgentMetadata {

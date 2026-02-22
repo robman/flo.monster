@@ -10,6 +10,7 @@ import {
   executeHubFiles,
   validateFilePath,
   unpackFilesToDisk,
+  packFilesFromDisk,
   hubFilesToolDef,
 } from '../tools/hub-files.js';
 
@@ -507,5 +508,97 @@ describe('hubFilesToolDef', () => {
       'frontmatter',
     ]);
     expect(actionProp.enum).toHaveLength(7);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// packFilesFromDisk
+// ---------------------------------------------------------------------------
+describe('packFilesFromDisk', () => {
+  it('packs text files with utf8 encoding', async () => {
+    const root = await createTestDir();
+    await writeFile(join(root, 'hello.txt'), 'hello world', 'utf-8');
+
+    const files = await packFilesFromDisk(root);
+    expect(files).toHaveLength(1);
+    expect(files[0].path).toBe('hello.txt');
+    expect(files[0].content).toBe('hello world');
+    expect(files[0].encoding).toBe('utf8');
+  });
+
+  it('packs binary files with base64 encoding', async () => {
+    const root = await createTestDir();
+    const binaryContent = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]);
+    await writeFile(join(root, 'image.png'), binaryContent);
+
+    const files = await packFilesFromDisk(root);
+    expect(files).toHaveLength(1);
+    expect(files[0].path).toBe('image.png');
+    expect(files[0].encoding).toBe('base64');
+    // Verify round-trip
+    const decoded = Buffer.from(files[0].content, 'base64');
+    expect(decoded).toEqual(binaryContent);
+  });
+
+  it('packs files from nested directories', async () => {
+    const root = await createTestDir();
+    await mkdir(join(root, 'sub/dir'), { recursive: true });
+    await writeFile(join(root, 'top.txt'), 'top', 'utf-8');
+    await writeFile(join(root, 'sub/mid.txt'), 'mid', 'utf-8');
+    await writeFile(join(root, 'sub/dir/deep.txt'), 'deep', 'utf-8');
+
+    const files = await packFilesFromDisk(root);
+    expect(files).toHaveLength(3);
+    const paths = files.map(f => f.path).sort();
+    expect(paths).toEqual(['sub/dir/deep.txt', 'sub/mid.txt', 'top.txt']);
+  });
+
+  it('returns empty array for non-existent directory', async () => {
+    const files = await packFilesFromDisk('/tmp/does-not-exist-' + Date.now());
+    expect(files).toEqual([]);
+  });
+
+  it('returns empty array for empty directory', async () => {
+    const root = await createTestDir();
+
+    const files = await packFilesFromDisk(root);
+    expect(files).toEqual([]);
+  });
+
+  it('handles mixed text and binary files', async () => {
+    const root = await createTestDir();
+    await writeFile(join(root, 'readme.md'), '# Hello', 'utf-8');
+    const pngData = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+    await writeFile(join(root, 'icon.png'), pngData);
+
+    const files = await packFilesFromDisk(root);
+    expect(files).toHaveLength(2);
+
+    const textFile = files.find(f => f.path === 'readme.md')!;
+    expect(textFile.encoding).toBe('utf8');
+    expect(textFile.content).toBe('# Hello');
+
+    const binFile = files.find(f => f.path === 'icon.png')!;
+    expect(binFile.encoding).toBe('base64');
+  });
+
+  it('round-trips with unpackFilesToDisk', async () => {
+    const srcRoot = await createTestDir();
+    await writeFile(join(srcRoot, 'file.txt'), 'round trip', 'utf-8');
+    const binData = Buffer.from([1, 2, 3, 4, 5]);
+    await writeFile(join(srcRoot, 'data.bin'), binData);
+
+    const packed = await packFilesFromDisk(srcRoot);
+
+    // Unpack to a different directory
+    const destRoot = srcRoot.replace(/\/$/, '') + '-dest/';
+    await mkdir(destRoot, { recursive: true });
+    await unpackFilesToDisk(packed, destRoot);
+
+    // Verify
+    const textContent = await readFile(join(destRoot, 'file.txt'), 'utf-8');
+    expect(textContent).toBe('round trip');
+    const binContent = await readFile(join(destRoot, 'data.bin'));
+    expect(binContent).toEqual(binData);
   });
 });

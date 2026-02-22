@@ -1,8 +1,11 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { createToolExecutor, isBrowserOnlyTool, isHubTool } from '../runner-tool-executor.js';
 import { getDefaultConfig } from '../config.js';
 import { HubAgentStateStore } from '../tools/hub-state.js';
 import { HubAgentStorageStore } from '../tools/hub-storage.js';
+import { mkdtemp, rm, readFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { AgentConfig } from '@flo-monster/core';
 
 describe('runner-tool-executor', () => {
@@ -893,6 +896,122 @@ describe('runner-tool-executor', () => {
         const result = await executor('context_search', { mode: 'tail', last: 5 });
         expect(result.is_error).toBe(true);
         expect(result.content).toContain('message history');
+      });
+    });
+
+    describe('onFileChange callback', () => {
+      let testDir: string;
+
+      afterEach(async () => {
+        if (testDir) {
+          await rm(testDir, { recursive: true, force: true }).catch(() => {});
+        }
+      });
+
+      async function createTestDir(): Promise<string> {
+        testDir = await mkdtemp(join(tmpdir(), 'tool-exec-test-'));
+        return testDir;
+      }
+
+      it('calls onFileChange after successful write_file', async () => {
+        const filesRoot = await createTestDir();
+        const onFileChange = vi.fn();
+
+        const executor = createToolExecutor({
+          hubConfig: getDefaultConfig(),
+          filesRoot,
+          onFileChange,
+        });
+
+        await executor('files', { action: 'write_file', path: 'test.txt', content: 'hello' });
+
+        expect(onFileChange).toHaveBeenCalledOnce();
+        expect(onFileChange).toHaveBeenCalledWith('test.txt', 'hello', 'write');
+      });
+
+      it('calls onFileChange after successful delete_file', async () => {
+        const filesRoot = await createTestDir();
+        // Create a file to delete
+        const { writeFile: fsWrite, mkdir: fsMkdir } = await import('node:fs/promises');
+        await fsMkdir(filesRoot, { recursive: true });
+        await fsWrite(join(filesRoot, 'doomed.txt'), 'bye', 'utf-8');
+
+        const onFileChange = vi.fn();
+
+        const executor = createToolExecutor({
+          hubConfig: getDefaultConfig(),
+          filesRoot,
+          onFileChange,
+        });
+
+        await executor('files', { action: 'delete_file', path: 'doomed.txt' });
+
+        expect(onFileChange).toHaveBeenCalledOnce();
+        expect(onFileChange).toHaveBeenCalledWith('doomed.txt', undefined, 'delete');
+      });
+
+      it('does NOT call onFileChange on read_file', async () => {
+        const filesRoot = await createTestDir();
+        const { writeFile: fsWrite } = await import('node:fs/promises');
+        await fsWrite(join(filesRoot, 'data.txt'), 'content', 'utf-8');
+
+        const onFileChange = vi.fn();
+
+        const executor = createToolExecutor({
+          hubConfig: getDefaultConfig(),
+          filesRoot,
+          onFileChange,
+        });
+
+        await executor('files', { action: 'read_file', path: 'data.txt' });
+
+        expect(onFileChange).not.toHaveBeenCalled();
+      });
+
+      it('does NOT call onFileChange on list_files', async () => {
+        const filesRoot = await createTestDir();
+        const onFileChange = vi.fn();
+
+        const executor = createToolExecutor({
+          hubConfig: getDefaultConfig(),
+          filesRoot,
+          onFileChange,
+        });
+
+        await executor('files', { action: 'list_files' });
+
+        expect(onFileChange).not.toHaveBeenCalled();
+      });
+
+      it('does NOT call onFileChange when write_file fails', async () => {
+        const filesRoot = await createTestDir();
+        const onFileChange = vi.fn();
+
+        const executor = createToolExecutor({
+          hubConfig: getDefaultConfig(),
+          filesRoot,
+          onFileChange,
+        });
+
+        // Path traversal should fail validation
+        const result = await executor('files', { action: 'write_file', path: '../../etc/evil', content: 'evil' });
+        expect(result.is_error).toBe(true);
+        expect(onFileChange).not.toHaveBeenCalled();
+      });
+
+      it('does NOT call onFileChange on mkdir', async () => {
+        const filesRoot = await createTestDir();
+        const onFileChange = vi.fn();
+
+        const executor = createToolExecutor({
+          hubConfig: getDefaultConfig(),
+          filesRoot,
+          onFileChange,
+        });
+
+        await executor('files', { action: 'mkdir', path: 'subdir' });
+
+        expect(onFileChange).not.toHaveBeenCalled();
       });
     });
   });
