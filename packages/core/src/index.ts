@@ -45,8 +45,14 @@ export {
   type ContextBuildOptions,
 } from './context/context-builder.js';
 export {
+  toApiMessage,
+  MESSAGE_API_FIELDS,
+  GEMINI_API_FIELDS,
+} from './context/api-fields.js';
+export {
   messageContains,
   mergeRanges,
   formatMessages,
   getMessagesByTurn,
 } from './context/context-search.js';
+export { compressBrowseResults } from './context/compress-browse.js';

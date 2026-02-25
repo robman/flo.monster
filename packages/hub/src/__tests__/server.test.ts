@@ -294,6 +294,40 @@ describe('hub server', () => {
       ws.close();
     });
 
+    it('should disable localhostBypassAuth when trustProxy is true', async () => {
+      await server.close();
+
+      config = {
+        ...getDefaultConfig(),
+        port: TEST_PORT,
+        host: '127.0.0.1',
+        localhostBypassAuth: true,
+        trustProxy: true,
+        authToken: 'test-token',
+        sandboxPath: sandboxDir,
+      };
+      server = createHubServer(config);
+      await new Promise((resolve) => {
+        const targetServer = server.httpServer ?? server.httpsServer;
+        if (targetServer) targetServer.once('listening', resolve);
+        else server.wss.once('listening', resolve);
+      });
+
+      const { ws, messages } = await createClient();
+
+      // Should NOT get auto-auth (trustProxy forces localhostBypassAuth=false)
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const autoAuth = messages.filter(m => m.type === 'auth_result');
+      expect(autoAuth.length).toBe(0);
+
+      // Manual auth should still work
+      ws.send(JSON.stringify({ type: 'auth', token: 'test-token' }));
+      const authResult = await waitForMessage<AuthResultMessage>(messages, 'auth_result');
+      expect(authResult.success).toBe(true);
+
+      ws.close();
+    });
+
     it('should reject invalid auth token', async () => {
       await server.close();
 
@@ -463,6 +497,100 @@ describe('hub server', () => {
         // Clean up
         fs.unlinkSync(certFile);
       }
+    });
+  });
+
+  describe('origin validation', () => {
+    it('should accept all origins when allowedOrigins not configured', async () => {
+      // Default config has no allowedOrigins — connection should work
+      const { ws } = await createClient();
+      expect(ws.readyState).toBe(WebSocket.OPEN);
+      ws.close();
+    });
+
+    it('should accept matching origin when allowedOrigins is set', async () => {
+      await server.close();
+
+      config = {
+        ...getDefaultConfig(),
+        port: TEST_PORT,
+        host: '127.0.0.1',
+        localhostBypassAuth: true,
+        sandboxPath: sandboxDir,
+        allowedOrigins: ['https://flo.monster'],
+      };
+      server = createHubServer(config);
+      await new Promise((resolve) => {
+        const targetServer = server.httpServer ?? server.httpsServer;
+        if (targetServer) targetServer.once('listening', resolve);
+        else server.wss.once('listening', resolve);
+      });
+
+      const ws = new WebSocket(`ws://127.0.0.1:${TEST_PORT}`, {
+        headers: { origin: 'https://flo.monster' },
+      });
+      await new Promise<void>((resolve, reject) => {
+        ws.once('open', () => resolve());
+        ws.once('error', reject);
+      });
+      expect(ws.readyState).toBe(WebSocket.OPEN);
+      ws.close();
+    });
+
+    it('should reject mismatched origin with close code 4003', async () => {
+      await server.close();
+
+      config = {
+        ...getDefaultConfig(),
+        port: TEST_PORT,
+        host: '127.0.0.1',
+        localhostBypassAuth: true,
+        sandboxPath: sandboxDir,
+        allowedOrigins: ['https://flo.monster'],
+      };
+      server = createHubServer(config);
+      await new Promise((resolve) => {
+        const targetServer = server.httpServer ?? server.httpsServer;
+        if (targetServer) targetServer.once('listening', resolve);
+        else server.wss.once('listening', resolve);
+      });
+
+      const ws = new WebSocket(`ws://127.0.0.1:${TEST_PORT}`, {
+        headers: { origin: 'https://evil.com' },
+      });
+
+      const closeCode = await new Promise<number>((resolve) => {
+        ws.on('close', (code) => resolve(code));
+      });
+      expect(closeCode).toBe(4003);
+    });
+
+    it('should accept connections with no origin header when allowedOrigins is set', async () => {
+      await server.close();
+
+      config = {
+        ...getDefaultConfig(),
+        port: TEST_PORT,
+        host: '127.0.0.1',
+        localhostBypassAuth: true,
+        sandboxPath: sandboxDir,
+        allowedOrigins: ['https://flo.monster'],
+      };
+      server = createHubServer(config);
+      await new Promise((resolve) => {
+        const targetServer = server.httpServer ?? server.httpsServer;
+        if (targetServer) targetServer.once('listening', resolve);
+        else server.wss.once('listening', resolve);
+      });
+
+      // Default WebSocket client sends no origin header
+      const ws = new WebSocket(`ws://127.0.0.1:${TEST_PORT}`);
+      await new Promise<void>((resolve, reject) => {
+        ws.once('open', () => resolve());
+        ws.once('error', reject);
+      });
+      expect(ws.readyState).toBe(WebSocket.OPEN);
+      ws.close();
     });
   });
 

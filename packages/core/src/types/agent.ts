@@ -8,8 +8,10 @@ export type AgentState = 'pending' | 'running' | 'paused' | 'stopped' | 'error' 
  * - max: Full view with both iframe and chat panes (default)
  * - ui-only: Only the iframe viewport visible (apps, games, immersive UIs)
  * - chat-only: Only the chat/conversation pane visible (text-focused, mobile)
+ * - web-max: Headless browser viewport + chat (desktop only)
+ * - web-only: Full headless browser viewport (works on mobile)
  */
-export type AgentViewState = 'min' | 'max' | 'ui-only' | 'chat-only';
+export type AgentViewState = 'min' | 'max' | 'ui-only' | 'chat-only' | 'web-max' | 'web-only';
 
 export interface AgentConfig {
   id: string;

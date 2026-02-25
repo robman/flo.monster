@@ -1224,7 +1224,7 @@ export function generateBootstrapScript(agentId: string): string {
 
       case 'user_message':
         // Route to specific worker if workerId provided, else main
-        relayToWorker(data.workerId || 'main', { type: 'user_message', content: data.content });
+        relayToWorker(data.workerId || 'main', { type: 'user_message', content: data.content, messageType: data.messageType });
         break;
 
       case 'pause':
@@ -1494,6 +1494,55 @@ export function generateBootstrapScript(agentId: string): string {
       flushState();
     }
   });
+
+  // ============================================================================
+  // Link Interception — prevent self-navigation, redirect external links
+  // ============================================================================
+
+  // Click listener (capture phase) for <a> elements
+  document.addEventListener('click', function(e) {
+    var el = e.target;
+    while (el && el.tagName !== 'A') el = el.parentElement;
+    if (!el) return;
+
+    var rawHref = el.getAttribute('href');
+    if (!rawHref) return;
+    var trimmed = rawHref.trim().toLowerCase();
+
+    // Block javascript: URLs — security risk
+    if (trimmed.startsWith('javascript:')) {
+      e.preventDefault();
+      return;
+    }
+
+    // Allow hash-only links — in-page navigation
+    if (rawHref.charAt(0) === '#') return;
+
+    // Allow data: and blob: URLs — downloads and embedded content
+    if (trimmed.startsWith('data:') || trimmed.startsWith('blob:')) return;
+
+    // External URLs (http/https/protocol-relative): prevent self-navigation, open in new tab
+    if (trimmed.startsWith('http:') || trimmed.startsWith('https:') || rawHref.startsWith('//')) {
+      if (!el.target || el.target === '_self') {
+        e.preventDefault();
+        window.open(el.href, '_blank', 'noopener');
+      }
+      // target="_blank" links work natively with allow-popups
+    }
+  }, true);
+
+  // Override window.open for safety — block javascript: and ensure noopener
+  var _origOpen = window.open;
+  window.open = function(url, target, features) {
+    if (typeof url === 'string' && url.trim().toLowerCase().startsWith('javascript:')) {
+      return null;
+    }
+    features = features || '';
+    if (features.indexOf('noopener') === -1) {
+      features = features ? features + ',noopener' : 'noopener';
+    }
+    return _origOpen.call(window, url, target, features);
+  };
 
   // ============================================================================
   // WebRTC Media Proxy — handle offers/ICE from shell

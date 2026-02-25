@@ -12,7 +12,8 @@ describe('getSystemSkills', () => {
     expect(names).toContain('flo-media');
     expect(names).toContain('flo-geolocation');
     expect(names).toContain('flo-hub');
-    expect(skills).toHaveLength(6);
+    expect(names).toContain('flo-browse');
+    expect(skills).toHaveLength(7);
   });
 
   it('all have category system', () => {

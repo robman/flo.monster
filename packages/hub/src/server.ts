@@ -25,10 +25,18 @@ import { BrowserToolRouter } from './browser-tool-router.js';
 import { Scheduler } from './scheduler.js';
 import { FailedAuthRateLimiter } from './rate-limiter.js';
 import { PushManager } from './push-manager.js';
+import { BrowseProxy } from './browse-proxy.js';
+import { BrowseSessionManager } from './browse-session.js';
 import { createHttpRequestHandler } from './http-server.js';
+import { generateSigningSecret } from './utils/signed-url.js';
 import { parseWsMessage, sendWsMessage } from './utils/ws-utils.js';
 import { handleMessage } from './handlers/message-handler.js';
 import { createRunnerDeps, setupEventForwarding } from './handlers/agent-handler.js';
+import { ScreencastManager } from './screencast-manager.js';
+import { StreamServer } from './stream-server.js';
+import { InterveneManager } from './intervene-manager.js';
+import { InterveneInputExecutor } from './intervene-input.js';
+import { randomUUID } from 'node:crypto';
 
 // Re-export all message types so existing imports from './server.js' continue to work
 export type {
@@ -56,6 +64,7 @@ export type {
 export { requestSkillApproval } from './handlers/message-handler.js';
 
 export interface ConnectedClient {
+  id: string;
   ws: WebSocket;
   authenticated: boolean;
   remoteAddress: string | undefined;
@@ -74,6 +83,7 @@ export interface HubServer {
   agentStore: AgentStore;
   scheduler?: Scheduler;
   pushManager?: PushManager;
+  browseSessionManager?: BrowseSessionManager;
   close(): Promise<void>;
 }
 
@@ -122,6 +132,14 @@ export function createHubServer(config: HubConfig): HubServer {
     }
   }
 
+  // SECURITY: When behind a trusted proxy, localhost bypass MUST be disabled.
+  // All connections appear to come from 127.0.0.1, so localhostBypassAuth
+  // would auto-authenticate every connection.
+  if (config.trustProxy && config.localhostBypassAuth) {
+    console.warn('[hub] WARNING: Disabling localhostBypassAuth because trustProxy=true. All connections appear local behind a proxy.');
+    config.localhostBypassAuth = false;
+  }
+
   // Ensure sandbox directory exists
   if (config.sandboxPath) {
     if (!existsSync(config.sandboxPath)) {
@@ -137,6 +155,15 @@ export function createHubServer(config: HubConfig): HubServer {
   const clients = new Set<ConnectedClient>();
   const agents = new Map<string, HeadlessAgentRunner>();
   const browserToolRouter = new BrowserToolRouter(clients);
+
+  // Generate signing secret for signed file URLs (used by browse screenshot + HTTP file endpoint)
+  const signingSecret = generateSigningSecret();
+
+  // Compute hub URL for constructing signed file URLs
+  const httpHost = config.publicHost || config.host;
+  const hubUrl = config.tls
+    ? `https://${httpHost}:${config.port}`
+    : `http://${httpHost}:${config.port}`;
 
   // Create scheduler for autonomous execution
   const scheduler = new Scheduler({
@@ -155,6 +182,10 @@ export function createHubServer(config: HubConfig): HubServer {
         browserToolRouter,
         scheduler,
         pushManager,
+        browseSessionManager,
+        browseProxy,
+        signingSecret,
+        hubUrl,
       }, runner);
       const toolExecutor = runnerDeps.executeToolCall;
       return toolExecutor(toolName, toolInput);
@@ -167,9 +198,28 @@ export function createHubServer(config: HubConfig): HubServer {
     ? new PushManager(pushDataDir, config.pushConfig)
     : undefined;
 
+  // Create browse infrastructure (headless browser proxy + session manager)
+  let browseProxy: BrowseProxy | undefined;
+  let browseSessionManager: BrowseSessionManager | undefined;
+  let screencastManager: ScreencastManager | undefined;
+  let streamServer: StreamServer | undefined;
+  let interveneManager: InterveneManager | undefined;
+  let interveneInputExecutor: InterveneInputExecutor | undefined;
+
+  if (config.tools.browse?.enabled) {
+    const browseConfig = config.tools.browse;
+    browseProxy = new BrowseProxy({
+      allowedDomains: browseConfig.allowedDomains,
+      blockedDomains: browseConfig.blockedDomains,
+      blockPrivateIPs: browseConfig.blockPrivateIPs,
+      rateLimitPerDomain: browseConfig.rateLimitPerDomain,
+    });
+    // Proxy and session manager are started asynchronously in the startup IIFE below
+  }
+
   // Initialize agent store for disk persistence
   const agentStorePath = config.agentStorePath || join(homedir(), '.flo-monster', 'agents');
-  const agentStore = new AgentStore(agentStorePath);
+  const agentStore = new AgentStore(agentStorePath, config.sandboxPath);
 
   // Create hook executor and skill manager before agent restore
   // (so restored agents can use them for agentic loop execution)
@@ -209,6 +259,108 @@ export function createHubServer(config: HubConfig): HubServer {
         }
       } catch (err) {
         console.warn(`[hub] WARNING: Failed to verify runAsUser '${user}':`, err);
+      }
+    }
+
+    // Start browse infrastructure
+    if (browseProxy) {
+      try {
+        const proxyPort = await browseProxy.start();
+        browseSessionManager = new BrowseSessionManager({
+          proxyPort,
+          maxConcurrentSessions: config.tools.browse!.maxConcurrentSessions,
+          sessionTimeoutMinutes: config.tools.browse!.sessionTimeoutMinutes,
+          viewport: config.tools.browse!.viewport,
+          agentStorePath,
+          debug: config.tools.browse!.debug,
+          stealth: config.tools.browse!.stealth,
+          skipStealthSections: config.tools.browse!.skipStealthSections,
+        });
+        browseSessionManager.start();
+        console.log(`[hub] Browse proxy started on port ${proxyPort}, session manager ready`);
+
+        // Start viewport stream infrastructure (screencast + dedicated stream WSS)
+        const streamConfig = config.tools.browse!.stream;
+        if (streamConfig?.enabled !== false) {
+          try {
+            screencastManager = new ScreencastManager(browseSessionManager, {
+              initialQuality: streamConfig?.initialQuality ?? 40,
+              maxQuality: streamConfig?.maxQuality ?? 80,
+            });
+
+            streamServer = new StreamServer({
+              host: config.host,
+              port: streamConfig?.port,
+              tls: config.tls ? {
+                cert: readFileSync(config.tls.certFile),
+                key: readFileSync(config.tls.keyFile),
+              } : undefined,
+              maxConnections: streamConfig?.maxConnections ?? 5,
+              tokenTTLSeconds: streamConfig?.tokenTTLSeconds ?? 30,
+            }, screencastManager);
+
+            const streamPort = await streamServer.start();
+            console.log(`[hub] Stream server started on port ${streamPort}`);
+          } catch (err) {
+            console.warn('[hub] Failed to start stream server:', err);
+            screencastManager = undefined;
+            streamServer = undefined;
+          }
+        }
+
+        // Create intervention infrastructure
+        if (browseSessionManager) {
+          interveneManager = new InterveneManager({
+            onTimeout: (session) => {
+              // Build notification and resume agent on timeout
+              (async () => {
+                try {
+                  const notification = '[User intervention timed out due to inactivity]';
+                  const runner = agents.get(session.agentId);
+                  if (runner && runner.isIntervenePaused) {
+                    runner.interveneEnd(notification);
+                  }
+                  // Notify the client
+                  for (const c of clients) {
+                    if (c.id === session.clientId) {
+                      sendWsMessage(c.ws, {
+                        type: 'browse_intervene_ended',
+                        agentId: session.agentId,
+                        reason: 'timeout',
+                      });
+                      break;
+                    }
+                  }
+                } catch (err) {
+                  console.warn('[hub] Error handling intervention timeout:', err);
+                }
+              })();
+            },
+          });
+          interveneManager.startSweep();
+
+          interveneInputExecutor = new InterveneInputExecutor(interveneManager, browseSessionManager, (clientId, agentId, state) => {
+            streamServer?.sendToClient(clientId, {
+              type: 'remote_focus',
+              ...state,
+            });
+          });
+
+          // Wire input events from stream server to executor
+          if (streamServer) {
+            streamServer.setInputEventHandler((clientId, agentId, event) => {
+              interveneInputExecutor!.execute(clientId, agentId, event).catch(err => {
+                console.warn('[hub] Input event execution error:', err);
+              });
+            });
+          }
+
+          console.log('[hub] Intervention infrastructure ready');
+        }
+      } catch (err) {
+        console.warn('[hub] Failed to start browse infrastructure:', err);
+        browseProxy = undefined;
+        browseSessionManager = undefined;
       }
     }
 
@@ -252,6 +404,10 @@ export function createHubServer(config: HubConfig): HubServer {
             browserToolRouter,
             scheduler,
             pushManager,
+            browseSessionManager,
+            browseProxy,
+            signingSecret,
+            hubUrl,
           }, runner, perAgentApiKey, sessionHooks as HookRulesConfig | undefined);
           runner.setDeps(runnerDeps);
 
@@ -301,6 +457,8 @@ export function createHubServer(config: HubConfig): HubServer {
   const httpHandler = createHttpRequestHandler({
     config,
     rateLimiter: authRateLimiter,
+    signingSecret,
+    agentStorePath,
   });
 
   let httpServer: HttpServer | undefined;
@@ -360,6 +518,17 @@ export function createHubServer(config: HubConfig): HubServer {
   wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
     const remoteAddress = req.socket.remoteAddress;
 
+    // Validate WebSocket origin when allowedOrigins is configured
+    if (config.allowedOrigins && config.allowedOrigins.length > 0) {
+      const origin = req.headers.origin;
+      // Allow connections with no origin header (non-browser clients like CLI tools)
+      if (origin && !config.allowedOrigins.includes(origin)) {
+        console.log(`[hub] Rejected WebSocket connection from disallowed origin: ${origin}`);
+        ws.close(4003, 'Origin not allowed');
+        return;
+      }
+    }
+
     // Rate limit check
     if (remoteAddress && !checkRateLimit(remoteAddress)) {
       console.log(`[hub] Rate limit exceeded for ${remoteAddress}`);
@@ -370,6 +539,7 @@ export function createHubServer(config: HubConfig): HubServer {
     console.log(`[hub] New connection from ${remoteAddress}`);
 
     const client: ConnectedClient = {
+      id: randomUUID(),
       ws,
       authenticated: false,
       remoteAddress,
@@ -468,7 +638,7 @@ export function createHubServer(config: HubConfig): HubServer {
       }
 
       // Handle message asynchronously
-      handleMessage(client, message, config, agents, clients, hookExecutor, skillManager, agentStore, browserToolRouter, agentStorePath, scheduler, pushManager).catch((err) => {
+      handleMessage(client, message, config, agents, clients, hookExecutor, skillManager, agentStore, browserToolRouter, agentStorePath, scheduler, pushManager, browseSessionManager, browseProxy, signingSecret, hubUrl, screencastManager, streamServer, interveneManager, interveneInputExecutor).catch((err) => {
         console.error('Error handling message:', err);
         sendWsMessage(ws, {
           type: 'error',
@@ -484,6 +654,24 @@ export function createHubServer(config: HubConfig): HubServer {
         pushManager.setDeviceConnected(client.deviceId, false);
       }
 
+      // Stop any active screencast streams for this client
+      if (screencastManager) {
+        screencastManager.stopAllForClient(client.id).catch(err => {
+          console.warn(`[hub] Failed to stop screencast for client:`, err);
+        });
+      }
+
+      // Release any intervention sessions for this client
+      if (interveneManager) {
+        const released = interveneManager.releaseAllForClient(client.id);
+        for (const session of released) {
+          const runner = agents.get(session.agentId);
+          if (runner && runner.isIntervenePaused) {
+            runner.interveneEnd('[User intervention ended — browser disconnected]');
+          }
+        }
+      }
+
       // Clean up last-active tracking for this client
       browserToolRouter.removeClient(client);
 
@@ -496,7 +684,10 @@ export function createHubServer(config: HubConfig): HubServer {
               type: 'context_change',
               hubAgentId,
               change: 'browser_disconnected',
-              availableTools: ['bash', 'filesystem', 'list_skills', 'load_skill', 'context_search'],
+              availableTools: [
+                'bash', 'filesystem', 'list_skills', 'load_skill', 'context_search',
+                ...(browseProxy && browseSessionManager ? ['browse'] : []),
+              ],
             });
           }
         }
@@ -511,7 +702,7 @@ export function createHubServer(config: HubConfig): HubServer {
     });
   });
 
-  return {
+  const hubServer: HubServer = {
     wss,
     httpServer,
     httpsServer,
@@ -520,6 +711,7 @@ export function createHubServer(config: HubConfig): HubServer {
     agentStore,
     scheduler,
     pushManager,
+    get browseSessionManager() { return browseSessionManager; },
     async close(): Promise<void> {
       clearInterval(rateLimitCleanupInterval);
       // Stop the scheduler
@@ -537,6 +729,24 @@ export function createHubServer(config: HubConfig): HubServer {
         } catch (err) {
           console.warn(`[hub] Failed to save agent ${hubAgentId} on shutdown:`, err);
         }
+      }
+
+      // Stop intervention sweep
+      if (interveneManager) {
+        interveneManager.stopSweep();
+      }
+
+      // Close stream server
+      if (streamServer) {
+        await streamServer.close();
+      }
+
+      // Close browse infrastructure
+      if (browseSessionManager) {
+        await browseSessionManager.closeAll();
+      }
+      if (browseProxy) {
+        await browseProxy.close();
       }
 
       return new Promise((resolve, reject) => {
@@ -583,4 +793,6 @@ export function createHubServer(config: HubConfig): HubServer {
       });
     },
   };
+
+  return hubServer;
 }

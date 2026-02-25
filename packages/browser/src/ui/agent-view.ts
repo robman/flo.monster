@@ -2,11 +2,15 @@ import type { AgentContainer } from '../agent/agent-container.js';
 import type { AgentState, AgentViewState, SkillInvocationResult } from '@flo-monster/core';
 import { ConversationView } from './conversation.js';
 import { isMobileViewport, onViewportChange } from './mobile-utils.js';
+import { ViewportCanvas } from './viewport-canvas.js';
+import { StreamClient } from '../shell/stream-client.js';
+import { InputOverlay } from './input-overlay.js';
+import { PinchZoomHandler } from './pinch-zoom.js';
 
-function resetThemeColor(): void {
-  const meta = document.querySelector('meta[name="theme-color"]') as HTMLMetaElement | null;
-  if (meta) meta.content = '#ffffff';
-}
+/** iOS Safari chrome color is determined by sampling the rendered page background,
+ * NOT by meta theme-color. We control it by ensuring the correct body background
+ * is visible (via body.mode-focused CSS) and hiding agent iframes with display:none
+ * when they shouldn't be visible (so Safari doesn't sample their bg color). */
 
 export interface AgentViewCallbacks {
   onPause?: (agentId: string) => void;
@@ -19,6 +23,8 @@ export interface AgentViewCallbacks {
   onSaveAsTemplate?: (agentId: string) => void;
   onPersist?: (agentId: string) => void;
   onViewStateChange?: (agentId: string, state: AgentViewState) => void;
+  onIntervene?: (agentId: string, mode: 'visible' | 'private') => void;
+  onReleaseIntervene?: (agentId: string) => void;
 }
 
 export class AgentView {
@@ -49,6 +55,18 @@ export class AgentView {
   private offlineHandler: (() => void) | null = null;
   private onlineHandler: (() => void) | null = null;
   private contentArea: HTMLElement | null = null;
+  private viewportPane: HTMLElement | null = null;
+  private viewportCanvas: ViewportCanvas | null = null;
+  private streamClient: StreamClient | null = null;
+  private hasBrowseSession = false;
+  private interveneMode: 'none' | 'visible' | 'private' = 'none';
+  private inputOverlay: InputOverlay | null = null;
+  private viewportToolbar: HTMLElement | null = null;
+  private _remoteViewport = { width: 1280, height: 720 };
+  private _remoteInputMode: string | undefined;
+  private _keyboardVisible = false;
+  private keyboardBtn: HTMLButtonElement | null = null;
+  private pinchZoom: PinchZoomHandler | null = null;
 
   constructor(container: HTMLElement, callbacks?: AgentViewCallbacks) {
     this.container = container;
@@ -72,6 +90,11 @@ export class AgentView {
     this.iframePane.className = 'agent-view__iframe-pane';
     this.contentArea.appendChild(this.iframePane);
 
+    // Viewport pane for headless browser stream (before splitter so it's on the left in web-max)
+    this.viewportPane = document.createElement('div');
+    this.viewportPane.className = 'agent-view__viewport-pane';
+    this.contentArea.appendChild(this.viewportPane);
+
     this.splitterEl = document.createElement('div');
     this.splitterEl.className = 'agent-view__splitter';
     this.contentArea.appendChild(this.splitterEl);
@@ -89,8 +112,12 @@ export class AgentView {
     this.viewportCloseBtn.textContent = '\u00D7'; // × symbol
     this.viewportCloseBtn.setAttribute('aria-label', 'Close');
     this.viewportCloseBtn.addEventListener('click', () => {
-      // Exit ui-only mode (not navigate away from agent)
-      this.setViewState(this.isMobile ? 'chat-only' : 'max');
+      // Exit ui-only / web-only mode (not navigate away from agent)
+      if (this.currentViewState === 'web-only') {
+        this.setViewState(this.isMobile ? 'chat-only' : 'web-max');
+      } else {
+        this.setViewState(this.isMobile ? 'chat-only' : 'max');
+      }
     });
     this.wrapperEl.appendChild(this.viewportCloseBtn);
 
@@ -118,6 +145,9 @@ export class AgentView {
       // Auto-transition from 'max' to 'chat-only' when viewport shrinks to mobile
       if (isMobile && wasDesktop && this.currentViewState === 'max') {
         this.setViewState('chat-only');
+      }
+      if (isMobile && wasDesktop && this.currentViewState === 'web-max') {
+        this.setViewState('web-only');
       }
 
       // Re-render header to update back button text and view state controls
@@ -206,11 +236,15 @@ export class AgentView {
       { state: 'max', label: '\u25A3', title: 'Full View (UI + Chat)' },
       { state: 'ui-only', label: '\u25A1', title: 'UI Only' },
       { state: 'chat-only', label: '\u2630', title: 'Chat Only' },
+      ...(this.hasBrowseSession ? [
+        { state: 'web-max' as AgentViewState, label: '\uD83C\uDF10', title: 'Web View + Chat' },
+        { state: 'web-only' as AgentViewState, label: '\uD83D\uDD0D', title: 'Web View Only' },
+      ] : []),
     ];
 
-    // Filter out 'max' on mobile viewports
+    // Filter out 'max' and 'web-max' on mobile viewports
     const states = this.isMobile
-      ? allStates.filter(s => s.state !== 'max')
+      ? allStates.filter(s => s.state !== 'max' && s.state !== 'web-max')
       : allStates;
 
     for (const { state, label, title } of states) {
@@ -224,10 +258,25 @@ export class AgentView {
   }
 
   private static SPLITTER_KEY = 'flo:splitter-ratio';
+  private static WEB_SPLITTER_KEY = 'flo:web-splitter-ratio';
+
+  /** Get the left pane for the current split mode (iframe for max, viewport for web-max). */
+  private getSplitLeftPane(): HTMLElement {
+    return this.currentViewState === 'web-max' && this.viewportPane
+      ? this.viewportPane
+      : this.iframePane;
+  }
+
+  private getSplitterKey(): string {
+    return this.currentViewState === 'web-max'
+      ? AgentView.WEB_SPLITTER_KEY
+      : AgentView.SPLITTER_KEY;
+  }
 
   private applySplitRatio(ratio: number): void {
-    this.iframePane.style.flex = 'none';
-    this.iframePane.style.width = `${ratio * 100}%`;
+    const leftPane = this.getSplitLeftPane();
+    leftPane.style.flex = 'none';
+    leftPane.style.width = `${ratio * 100}%`;
     this.conversationPane.style.flex = 'none';
     this.conversationPane.style.width = `${(1 - ratio) * 100}%`;
   }
@@ -236,27 +285,16 @@ export class AgentView {
     let dragging = false;
     let currentRatio = 0.5;
 
-    // Restore persisted ratio
-    try {
-      const saved = localStorage.getItem(AgentView.SPLITTER_KEY);
-      if (saved) {
-        const r = parseFloat(saved);
-        if (r >= 0.2 && r <= 0.8) {
-          currentRatio = r;
-          this.applySplitRatio(r);
-        }
-      }
-    } catch { /* localStorage unavailable */ }
-
     const onPointerDown = (e: PointerEvent) => {
-      if (this.currentViewState !== 'max' || this.isMobile) return;
+      if ((this.currentViewState !== 'max' && this.currentViewState !== 'web-max') || this.isMobile) return;
       e.preventDefault();
       dragging = true;
       this.splitterEl.classList.add('agent-view__splitter--active');
       this.splitterEl.setPointerCapture(e.pointerId);
-      // Prevent iframe from stealing pointer events during drag
+      // Prevent panes from stealing pointer events during drag
       this.iframePane.style.pointerEvents = 'none';
       this.conversationPane.style.pointerEvents = 'none';
+      if (this.viewportPane) this.viewportPane.style.pointerEvents = 'none';
     };
 
     const onPointerMove = (e: PointerEvent) => {
@@ -274,7 +312,8 @@ export class AgentView {
       this.splitterEl.classList.remove('agent-view__splitter--active');
       this.iframePane.style.pointerEvents = '';
       this.conversationPane.style.pointerEvents = '';
-      try { localStorage.setItem(AgentView.SPLITTER_KEY, currentRatio.toString()); } catch { /* */ }
+      if (this.viewportPane) this.viewportPane.style.pointerEvents = '';
+      try { localStorage.setItem(this.getSplitterKey(), currentRatio.toString()); } catch { /* */ }
     };
 
     this.splitterEl.addEventListener('pointerdown', onPointerDown);
@@ -286,13 +325,17 @@ export class AgentView {
   private resetSplitter(): void {
     this.iframePane.style.flex = '';
     this.iframePane.style.width = '';
+    if (this.viewportPane) {
+      this.viewportPane.style.flex = '';
+      this.viewportPane.style.width = '';
+    }
     this.conversationPane.style.flex = '';
     this.conversationPane.style.width = '';
   }
 
   private restoreSplitter(): void {
     try {
-      const saved = localStorage.getItem(AgentView.SPLITTER_KEY);
+      const saved = localStorage.getItem(this.getSplitterKey());
       if (saved) {
         const r = parseFloat(saved);
         if (r >= 0.2 && r <= 0.8) this.applySplitRatio(r);
@@ -305,24 +348,33 @@ export class AgentView {
     if (this.isMobile && state === 'max') {
       state = 'chat-only';
     }
+    if (this.isMobile && state === 'web-max') {
+      state = 'web-only';
+    }
 
     if (state === this.currentViewState) return;
-    // Reset splitter widths when leaving max mode
-    if (this.currentViewState === 'max') this.resetSplitter();
+    // Reset splitter widths when leaving a split mode
+    if (this.currentViewState === 'max' || this.currentViewState === 'web-max') this.resetSplitter();
     this.currentViewState = state;
-    // Restore persisted splitter ratio when entering max mode
-    if (state === 'max') this.restoreSplitter();
+    // Restore persisted splitter ratio when entering a split mode
+    if (state === 'max' || state === 'web-max') this.restoreSplitter();
 
     // Update wrapper CSS class
-    this.wrapperEl.classList.remove('agent-view--max', 'agent-view--ui-only', 'agent-view--chat-only');
+    this.wrapperEl.classList.remove('agent-view--max', 'agent-view--ui-only', 'agent-view--chat-only', 'agent-view--web-max', 'agent-view--web-only');
     this.wrapperEl.classList.add(`agent-view--${state}`);
 
     // Toggle body class so elements outside agent-view (top bar, status bar) can hide
-    if (state === 'ui-only') {
+    if (state === 'ui-only' || state === 'web-only') {
       document.body.classList.add('view-ui-only');
     } else {
       document.body.classList.remove('view-ui-only');
-      resetThemeColor();
+    }
+
+    // Custom pinch-zoom on canvas (prevents browser zoom, keeps toolbar/close fixed)
+    if ((state === 'web-only' || state === 'web-max') && this.viewportCanvas) {
+      this.setupPinchZoom();
+    } else {
+      this.teardownPinchZoom();
     }
 
     // Update control buttons
@@ -522,7 +574,7 @@ export class AgentView {
     this.agent = agent;
 
     // Re-apply body class after unmount() cleared it
-    if (this.currentViewState === 'ui-only') {
+    if (this.currentViewState === 'ui-only' || this.currentViewState === 'web-only') {
       document.body.classList.add('view-ui-only');
     }
 
@@ -588,23 +640,35 @@ export class AgentView {
     if (agent.hubPersistInfo && agent.state !== 'running') {
       this.conversation.setInputEnabled(false);
     }
+
+    // Render viewport toolbar if browse session was flagged before mount
+    if (this.hasBrowseSession) {
+      this.updateViewportToolbar();
+    }
   }
 
   unmount(): void {
     this.closeMobileMenu();
+    this.teardownPinchZoom();
     if (this.unsubscribe) {
       this.unsubscribe();
       this.unsubscribe = null;
     }
     // Clear hub offline banner when switching away from agent
     this.conversation.setHubOffline(false);
+    this.stopStream();
+    // Clean up toolbar (not done in stopStream — toolbar survives stream cycles)
+    if (this.viewportToolbar) {
+      this.viewportToolbar.remove();
+      this.viewportToolbar = null;
+    }
     this.agent = null;
     document.body.classList.remove('view-ui-only');
-    resetThemeColor();
   }
 
   destroy(): void {
     this.closeMobileMenu();
+    this.stopStream();
     this.unmount();
     if (this.offlineHandler) {
       window.removeEventListener('offline', this.offlineHandler);
@@ -615,7 +679,6 @@ export class AgentView {
       this.onlineHandler = null;
     }
     document.body.classList.remove('view-ui-only');
-    resetThemeColor();
     if (this.viewportUnsubscribe) {
       this.viewportUnsubscribe();
       this.viewportUnsubscribe = null;
@@ -632,5 +695,268 @@ export class AgentView {
 
   getIframePane(): HTMLElement {
     return this.iframePane;
+  }
+
+  getViewportPane(): HTMLElement | null {
+    return this.viewportPane;
+  }
+
+  getHasBrowseSession(): boolean {
+    return this.hasBrowseSession;
+  }
+
+  /**
+   * Set whether the agent has an active headless browse session.
+   * Controls visibility of web-max and web-only view state buttons.
+   */
+  setHasBrowseSession(hasBrowse: boolean): void {
+    this.hasBrowseSession = hasBrowse;
+    this.renderViewStateControls();
+    if (!hasBrowse && this.viewportToolbar) {
+      this.viewportToolbar.remove();
+      this.viewportToolbar = null;
+    } else {
+      this.updateViewportToolbar();
+    }
+  }
+
+  /**
+   * Start streaming viewport frames. Called when entering web-max or web-only.
+   */
+  startStream(streamUrl: string, token: string, viewport?: { width: number; height: number }, onStreamClosed?: () => void): void {
+    this.stopStream();
+
+    // Store viewport dimensions for input overlay
+    this._remoteViewport = viewport ?? { width: 1280, height: 720 };
+
+    // Create viewport canvas if needed
+    if (this.viewportPane && !this.viewportCanvas) {
+      this.viewportCanvas = new ViewportCanvas(this.viewportPane);
+      // Set up pinch-zoom if in a viewport mode
+      if (this.currentViewState === 'web-only' || this.currentViewState === 'web-max') {
+        this.setupPinchZoom();
+      }
+    }
+
+    this.streamClient = new StreamClient(streamUrl, token);
+    this.streamClient.setFrameHandler((data) => {
+      this.viewportCanvas?.handleFrame(data);
+    });
+    this.streamClient.setCloseHandler(() => {
+      this.streamClient = null;
+      onStreamClosed?.();
+    });
+    this.streamClient.setErrorHandler((error) => {
+      console.warn('[agent-view] Stream error:', error);
+      this.streamClient = null;
+      onStreamClosed?.();
+    });
+    this.streamClient.setControlMessageHandler((msg) => {
+      if (msg.type === 'remote_focus') {
+        const focusMsg = msg as { focused: boolean; inputType?: string; inputMode?: string };
+        if (this.inputOverlay) {
+          this.inputOverlay.handleRemoteFocusChange(focusMsg);
+        }
+        if (focusMsg.focused) {
+          this._remoteInputMode = focusMsg.inputMode;
+          if (this.keyboardBtn) this.keyboardBtn.style.display = '';
+        } else {
+          if (this._keyboardVisible && this.inputOverlay) {
+            this.inputOverlay.hideKeyboard();
+          }
+          this._keyboardVisible = false;
+          this._remoteInputMode = undefined;
+          if (this.keyboardBtn) this.keyboardBtn.style.display = 'none';
+        }
+      }
+    });
+
+    this.streamClient.connect().catch((err) => {
+      console.warn('[agent-view] Failed to connect stream:', err);
+      this.streamClient = null;
+      onStreamClosed?.();
+    });
+  }
+
+  /**
+   * Stop streaming viewport frames. Called when leaving web-max or web-only.
+   */
+  stopStream(): void {
+    this.teardownPinchZoom();
+    if (this.streamClient) {
+      this.streamClient.close();
+      this.streamClient = null;
+    }
+    if (this.viewportCanvas) {
+      this.viewportCanvas.destroy();
+      this.viewportCanvas = null;
+    }
+    if (this.inputOverlay) {
+      this.inputOverlay.destroy();
+      this.inputOverlay = null;
+    }
+    this.interveneMode = 'none';
+    // Toolbar survives stream start/stop — only removed on unmount or hasBrowseSession(false)
+  }
+
+  /**
+   * Set the intervention mode (called when hub grants/denies/ends intervention).
+   */
+  setInterveneMode(mode: 'none' | 'visible' | 'private'): void {
+    this.interveneMode = mode;
+    // Clear keyboard state when ending intervention
+    if (mode === 'none') {
+      this._remoteInputMode = undefined;
+      this._keyboardVisible = false;
+      this.keyboardBtn = null;
+    }
+    this.updateViewportToolbar();
+
+    // Manage input overlay
+    if (mode !== 'none' && this.viewportPane && this.streamClient) {
+      // Create input overlay
+      if (!this.inputOverlay) {
+        this.inputOverlay = new InputOverlay(this.viewportPane, this.streamClient, {
+          viewportWidth: this._remoteViewport.width,
+          viewportHeight: this._remoteViewport.height,
+        });
+      }
+    } else {
+      // Remove input overlay
+      if (this.inputOverlay) {
+        this.inputOverlay.destroy();
+        this.inputOverlay = null;
+      }
+    }
+
+    // Update border indicator
+    if (this.viewportPane) {
+      this.viewportPane.classList.remove('intervene-visible', 'intervene-private');
+      if (mode === 'visible') {
+        this.viewportPane.classList.add('intervene-visible');
+      } else if (mode === 'private') {
+        this.viewportPane.classList.add('intervene-private');
+      }
+    }
+  }
+
+  /**
+   * Get current intervention mode.
+   */
+  getInterveneMode(): 'none' | 'visible' | 'private' {
+    return this.interveneMode;
+  }
+
+  /**
+   * Show an intervention notification in the conversation as a collapsed details block.
+   */
+  showInterventionBlock(text: string): void {
+    this.conversation.addInterventionBlock(text);
+  }
+
+  /**
+   * Set up custom pinch-zoom on the viewport canvas.
+   * Prevents browser-level zoom (which scales everything including toolbar/close button)
+   * and instead zooms only the canvas via CSS transform.
+   */
+  private setupPinchZoom(): void {
+    this.teardownPinchZoom();
+    if (!this.viewportPane || !this.viewportCanvas) return;
+
+    const canvasEl = this.viewportCanvas.getElement();
+    this.pinchZoom = new PinchZoomHandler(this.viewportPane, canvasEl, (transform) => {
+      // Forward zoom transform to InputOverlay for NDC adjustment
+      if (this.inputOverlay) {
+        this.inputOverlay.setCanvasZoom(transform);
+      }
+    });
+  }
+
+  private teardownPinchZoom(): void {
+    if (this.pinchZoom) {
+      this.pinchZoom.destroy();
+      this.pinchZoom = null;
+    }
+    // Clear zoom on InputOverlay
+    if (this.inputOverlay) {
+      this.inputOverlay.setCanvasZoom({ scale: 1, panX: 0, panY: 0 });
+    }
+  }
+
+  /**
+   * Update the viewport toolbar (Intervene/Private/Release buttons).
+   */
+  private updateViewportToolbar(): void {
+    if (!this.viewportPane) return;
+
+    // Remove existing toolbar
+    if (this.viewportToolbar) {
+      this.viewportToolbar.remove();
+    }
+
+    const agentId = this.agent?.id;
+    if (!agentId || !this.hasBrowseSession) return;
+
+    this.viewportToolbar = document.createElement('div');
+    this.viewportToolbar.className = 'viewport-toolbar';
+
+    if (this.interveneMode === 'none') {
+      // Show "Take control:" label + Show Agent / Private buttons
+      const label = document.createElement('span');
+      label.className = 'viewport-toolbar__label';
+      label.textContent = 'Take control:';
+
+      const showAgentBtn = document.createElement('button');
+      showAgentBtn.className = 'btn viewport-toolbar__btn viewport-toolbar__btn--intervene';
+      showAgentBtn.textContent = 'Show Agent';
+      showAgentBtn.title = 'Agent sees everything you do and enter';
+      showAgentBtn.addEventListener('click', () => {
+        this.callbacks.onIntervene?.(agentId, 'visible');
+      });
+
+      const privateBtn = document.createElement('button');
+      privateBtn.className = 'btn viewport-toolbar__btn viewport-toolbar__btn--private';
+      privateBtn.textContent = 'Private';
+      privateBtn.title = 'Agent only sees the end result';
+      privateBtn.addEventListener('click', () => {
+        this.callbacks.onIntervene?.(agentId, 'private');
+      });
+
+      this.viewportToolbar.appendChild(label);
+      this.viewportToolbar.appendChild(showAgentBtn);
+      this.viewportToolbar.appendChild(privateBtn);
+    } else {
+      // Show Keyboard button (hidden until remote input is focused)
+      this.keyboardBtn = document.createElement('button');
+      this.keyboardBtn.className = 'btn viewport-toolbar__btn viewport-toolbar__btn--keyboard';
+      this.keyboardBtn.textContent = 'Keyboard';
+      this.keyboardBtn.title = 'Open soft keyboard for text input';
+      this.keyboardBtn.style.display = this._remoteInputMode ? '' : 'none';
+      this.keyboardBtn.addEventListener('click', () => {
+        if (this.inputOverlay) {
+          this.inputOverlay.showKeyboard(this._remoteInputMode);
+          this._keyboardVisible = true;
+        }
+      });
+
+      // Show Release Control button
+      const releaseBtn = document.createElement('button');
+      releaseBtn.className = 'btn viewport-toolbar__btn viewport-toolbar__btn--release';
+      releaseBtn.textContent = 'Release Control';
+      releaseBtn.title = 'Give control back to the agent';
+      releaseBtn.addEventListener('click', () => {
+        this.callbacks.onReleaseIntervene?.(agentId);
+      });
+
+      this.viewportToolbar.appendChild(this.keyboardBtn);
+      this.viewportToolbar.appendChild(releaseBtn);
+    }
+
+    this.viewportPane.appendChild(this.viewportToolbar);
+
+    // Set up pinch-zoom if in a viewport mode (pinch-zoom lives on viewport pane, not toolbar)
+    if ((this.currentViewState === 'web-only' || this.currentViewState === 'web-max') && this.viewportCanvas && !this.pinchZoom) {
+      this.setupPinchZoom();
+    }
   }
 }

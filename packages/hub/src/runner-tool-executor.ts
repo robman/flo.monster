@@ -19,6 +19,10 @@ import type { HubDomContainer } from './dom-container.js';
 import { executeScheduleTool, type ScheduleToolInput } from './tools/schedule.js';
 import { executeHubContextSearch } from './tools/context-search.js';
 import { executeHubRunJs, type HubRunJsDeps } from './tools/hub-runjs.js';
+import { executeBrowse, type BrowseInput, type BrowseDeps } from './tools/browse.js';
+import type { BrowseSessionManager } from './browse-session.js';
+import type { BrowseProxy } from './browse-proxy.js';
+import type { BrowseToolConfig } from './config.js';
 import type { Scheduler } from './scheduler.js';
 import type { PushManager } from './push-manager.js';
 import type { HeadlessAgentRunner } from './agent-runner.js';
@@ -42,6 +46,7 @@ const HUB_TOOLS = new Set([
   'load_skill',
   'context_search',
   'schedule',
+  'browse',
 ]);
 
 export interface RunnerToolExecutorDeps {
@@ -58,11 +63,16 @@ export interface RunnerToolExecutorDeps {
   domContainer?: HubDomContainer;
   scheduler?: Scheduler;
   agentSandbox?: string;
-  getMessages?: () => Array<{ role: string; content: ContentBlock[]; turnId?: string }>;
+  getMessages?: () => Array<{ role?: string; type?: string; content: ContentBlock[]; turnId?: string }>;
   declarativeHookEvaluator?: DeclarativeHookEvaluator;
   pushManager?: PushManager;
   runner?: HeadlessAgentRunner;
   agentDataDir?: string;
+  browseSessionManager?: BrowseSessionManager;
+  browseProxy?: BrowseProxy;
+  browseConfig?: BrowseToolConfig;
+  signingSecret?: Buffer;
+  hubUrl?: string;
   onFileChange?: (path: string, content: string | undefined, action: 'write' | 'delete') => void;
 }
 
@@ -91,6 +101,7 @@ async function executeRunnerToolCall(
         hasFilesRoot: !!deps.filesRoot,
         hasDomContainer: !!deps.domContainer,
         hasScheduler: !!deps.scheduler,
+        hasBrowse: !!deps.browseSessionManager,
       });
       return { content: JSON.stringify(result, null, 2) };
     }
@@ -242,6 +253,28 @@ async function executeRunnerToolCall(
     }
     return {
       content: 'Tool "context_search" requires message history or a connected browser.',
+      is_error: true,
+    };
+  }
+
+  // Hub-side browse: headless browser via Playwright
+  if (name === 'browse') {
+    if (deps.browseSessionManager && deps.browseProxy && deps.browseConfig) {
+      const agentId = deps.hubAgentId || 'unknown';
+      const browseDeps: BrowseDeps = {
+        sessionManager: deps.browseSessionManager,
+        proxy: deps.browseProxy,
+        config: deps.browseConfig,
+        agentId,
+        elementRefs: deps.browseSessionManager.getElementRefs(agentId),
+        fileRoot: deps.filesRoot,
+        hubUrl: deps.hubUrl,
+        signingSecret: deps.signingSecret,
+      };
+      return executeBrowse(input as unknown as BrowseInput, browseDeps);
+    }
+    return {
+      content: 'Browse tool is not enabled on this hub. Set tools.browse.enabled = true in hub config.',
       is_error: true,
     };
   }

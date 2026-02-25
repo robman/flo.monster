@@ -669,9 +669,225 @@ When no browser is connected, \`dom listen\` and \`dom wait_for\` will return er
   installedAt: 0,
 };
 
+const floBrowse: StoredSkill = {
+  name: 'flo-browse',
+  manifest: {
+    name: 'flo-browse',
+    description: 'Headless browser: load pages, read accessibility tree, interact via element refs, extract data, screenshot, evaluate JS',
+    category: 'system',
+    userInvocable: false,
+  },
+  instructions: `# flo Browse — Headless Browser on the Hub
+
+Your \`web_fetch\` tool grabs raw HTML, but the modern web runs on JavaScript. SPAs render nothing until scripts execute. Auth flows redirect through multiple pages. Interactive apps need clicks, form fills, and waits. The \`browse\` tool gives you a full headless Chromium instance on the hub — JavaScript renders, cookies persist across requests, sessions maintain state, and you see the page the way a user does.
+
+> **Unlearn**: This is NOT a fetch-and-parse workflow. You do not get HTML source. You get an accessibility tree — a structured representation of what a sighted user would see on screen. You interact through element refs, not CSS selectors or XPaths. Think of it as navigating the page through a screen reader, not through the DOM inspector.
+
+## Execution Mode
+
+**Hub only.** The browse tool runs headless Chromium on the hub server. It is available in \`hub-with-browser\` and \`hub-only\` modes. It is NOT available in \`browser-only\` mode (no hub, no headless browser).
+
+Each agent gets an isolated browser context — separate cookies, storage, and session state. Sessions auto-close after idle timeout, or you can close them explicitly.
+
+## The Core Loop
+
+Every browsing workflow follows this pattern:
+
+1. **Load** a URL → get the accessibility tree
+2. **Read** the tree to understand the page — find the elements you need
+3. **Interact** via refs (click, fill, select) → get an updated tree
+4. **Repeat** until you have what you need
+5. **Extract** structured data or **close** the session
+
+The accessibility tree is returned automatically after load, click, fill, select, scroll, back, forward, and wait_for. You don't need to request it separately.
+
+## Element Refs
+
+Every interactive element in the accessibility tree gets a ref: \`e1\`, \`e2\`, \`e3\`, etc. These are positional identifiers assigned fresh on each snapshot. After any action that returns a new tree, the old refs are invalid — always use the most recent ones.
+
+The tree looks like this:
+\`\`\`
+- heading "Search" [level=1]
+- searchbox "Search the web" [ref=e1]
+- button "Search" [ref=e2]
+- navigation "Main menu"
+  - link "Home" [ref=e3, url=https://example.com/]
+  - link "About" [ref=e4, url=https://example.com/about]
+\`\`\`
+
+Refs are the preferred way to target elements. You can also use \`selector\` (CSS) or \`text\` (content match) as fallbacks, but refs are more reliable because they map directly to the accessibility tree.
+
+## Actions
+
+### Navigate
+
+\`\`\`
+browse({ action: "load", url: "https://example.com" })
+\`\`\`
+
+Navigates to the URL, waits for DOM content loaded, returns the accessibility tree. Only \`http:\` and \`https:\` URLs are allowed. Private IPs are blocked (SSRF protection). Domain policy (allow/block lists) is enforced.
+
+### Click
+
+\`\`\`
+browse({ action: "click", ref: "e2" })
+browse({ action: "click", selector: "#submit-btn" })
+browse({ action: "click", text: "Sign in" })
+\`\`\`
+
+Clicks an element identified by ref, CSS selector, or text content. Returns the updated tree — useful for detecting navigation, expanded menus, or page state changes after the click.
+
+### Fill
+
+\`\`\`
+browse({ action: "fill", ref: "e1", value: "search query" })
+browse({ action: "fill", selector: "input[name=email]", value: "user@example.com" })
+\`\`\`
+
+Types text into a form field. Clears existing content first. Use \`ref\` to target the field from the accessibility tree, or \`selector\`/\`text\` as fallbacks.
+
+### Select
+
+\`\`\`
+browse({ action: "select", ref: "e5", value: "option-value" })
+\`\`\`
+
+Selects an option from a dropdown by its value.
+
+### Scroll
+
+\`\`\`
+browse({ action: "scroll", direction: "down" })
+browse({ action: "scroll", direction: "up" })
+browse({ action: "scroll", direction: "top" })
+browse({ action: "scroll", direction: "bottom" })
+\`\`\`
+
+Scrolls the page. Returns the updated tree — new content may appear after scrolling (lazy-loaded sections, infinite scroll).
+
+### Press Key
+
+\`\`\`
+browse({ action: "press_key", key: "Enter" })
+browse({ action: "press_key", key: "Tab" })
+browse({ action: "press_key", key: "Escape" })
+browse({ action: "press_key", key: "ArrowDown" })
+\`\`\`
+
+Presses a keyboard key. Use this to submit forms (Enter), dismiss dialogs (Escape), navigate autocomplete menus (ArrowDown/ArrowUp), or tab between fields. Key names follow the Playwright key convention — common keys: \`Enter\`, \`Tab\`, \`Escape\`, \`Backspace\`, \`ArrowUp\`, \`ArrowDown\`, \`ArrowLeft\`, \`ArrowRight\`, \`Space\`.
+
+### Extract
+
+\`\`\`
+browse({ action: "extract", extractType: "links" })
+browse({ action: "extract", extractType: "tables" })
+browse({ action: "extract", extractType: "text" })
+browse({ action: "extract", extractType: "metadata" })
+\`\`\`
+
+Bulk data extraction without walking the tree manually:
+- **links** — all \`<a href>\` elements as \`[{ text, href }]\`
+- **tables** — first \`<table>\` as a 2D array of cell text
+- **text** — \`document.body.innerText\` (the full visible text)
+- **metadata** — title, description, Open Graph tags, canonical URL
+
+### Screenshot
+
+\`\`\`
+browse({ action: "screenshot" })
+\`\`\`
+
+Captures the visible viewport as a JPEG and returns a URL you can use directly in \`<img>\` tags (e.g. \`<img src="..." />\`). Useful when visual layout matters — charts, images, complex CSS. The URL is time-limited (1 hour). Prefer the accessibility tree for text-based content.
+
+### Evaluate
+
+\`\`\`
+browse({ action: "evaluate", expression: "document.querySelectorAll('.item').length" })
+\`\`\`
+
+Runs a JavaScript expression in the page context and returns the result as JSON. For cases where the accessibility tree and extract don't cover what you need.
+
+### Wait
+
+\`\`\`
+browse({ action: "wait_for", selector: ".results-loaded", timeout: 10000 })
+browse({ action: "wait_for", timeout: 5000 })
+\`\`\`
+
+Waits for an element to appear (by CSS selector) or for network idle. Default timeout is 5000ms. Returns the updated tree. Use this after actions that trigger async loading — AJAX requests, client-side rendering.
+
+### History
+
+\`\`\`
+browse({ action: "back" })
+browse({ action: "forward" })
+\`\`\`
+
+Standard browser history navigation. Both return the updated tree.
+
+### Close
+
+\`\`\`
+browse({ action: "close" })
+\`\`\`
+
+Closes the browsing session and releases resources. Always close when you're done — sessions consume memory on the hub. If you forget, they auto-close after the idle timeout.
+
+## Watch Mode (Live Viewport)
+
+When you have an active browse session, the \`view_state\` tool gains two additional states:
+
+- **\`web-max\`** (desktop only) — live browser viewport + chat side by side
+- **\`web-only\`** — live browser viewport fullscreen (works on mobile too)
+
+These stream the actual headless browser viewport to the user in real-time. The user sees exactly what the browser shows — every page load, scroll, click, and animation — as a live video feed. This is fundamentally different from a screenshot: it's continuous and automatic.
+
+**When to use**: If the user asks to see what you're browsing, or if visual context would help (e.g. "show me the page"), switch to \`web-max\` or \`web-only\` with the \`view_state\` tool. You do NOT need to take a screenshot or embed images in the DOM — the live stream handles it.
+
+\`\`\`
+view_state({ state: "web-max" })   // viewport + chat
+view_state({ state: "web-only" })  // viewport fullscreen
+\`\`\`
+
+The user can also switch to these view states themselves via the UI controls. The stream starts automatically when entering a web view state and stops when leaving it.
+
+Users can take manual control of the browser session via the Intervene button in the viewport toolbar — visible mode lets you see their actions, private mode hides input details.
+
+## Tips
+
+- **Prefer refs over selectors.** Refs come from the accessibility tree, which reflects what's actually rendered. CSS selectors can match hidden elements or break when class names change.
+- **Use extract for bulk data.** If you need all links on a page, \`extract\` with \`extractType: "links"\` is one call. Walking the tree and clicking each link is many.
+- **Wait after dynamic actions.** If a click triggers an AJAX request, the immediate tree may not reflect the new content. Use \`wait_for\` with the selector of the expected content.
+- **Sessions persist across calls.** You load a page, then later click a button — same session, same cookies, same login state. You don't need to reload between actions.
+- **One session per agent.** Each agent gets one browser context. Closing and reopening starts fresh (new cookies, new state).
+- **Close when done.** Don't leave sessions open if you're finished browsing. They consume resources on the hub server.
+- **Ask the user for login/auth.** If a page requires login, account creation, or any authentication step, tell the user and ask them to use the Intervene button to complete it manually. Do NOT attempt to fill in credentials or create accounts on the user's behalf, unless you are explicitly directed to do so. Same applies for cookie consent walls, age verification, or any gate that requires human decision-making.
+
+## Page JS Integration
+
+When building UI with external links, use \`flo.callTool('browse')\` instead of plain \`<a href>\` links:
+
+\`\`\`javascript
+// Instead of: <a href="https://example.com">Visit</a>
+// Do this:
+button.onclick = function() {
+  flo.callTool('browse', { action: 'load', url: 'https://example.com' });
+};
+\`\`\`
+
+This opens the page in the headless browser where you can see and interact with it. The user can watch via web-max viewport mode.
+
+For simple links that should open in the user's browser (no agent interaction needed), use \`target="_blank"\`:
+\`\`\`html
+<a href="https://example.com" target="_blank">Visit in browser</a>
+\`\`\``,
+  source: { type: 'builtin' },
+  installedAt: 0,
+};
+
 /**
  * Returns all system skills for installation at startup
  */
 export function getSystemSkills(): StoredSkill[] {
-  return [floSrcdoc, floSubagent, floSpeech, floMedia, floGeolocation, floHub];
+  return [floSrcdoc, floSubagent, floSpeech, floMedia, floGeolocation, floHub, floBrowse];
 }

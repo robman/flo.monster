@@ -56,6 +56,7 @@ export const TOOL_TIERS: Record<string, ToolSecurityTier> = {
   fetch: 'prompted',
   web_fetch: 'prompted',
   web_search: 'prompted',
+  browse: 'prompted',
   // Blocked - hub/system tools not allowed from srcdoc JS
   bash: 'blocked',
   read_file: 'blocked',

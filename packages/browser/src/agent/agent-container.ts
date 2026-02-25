@@ -172,7 +172,11 @@ export class AgentContainer {
             this._lastSentMessage = null;
             return;
           }
-          this.emitEvent({ type: 'hub_user_message', content } as any);
+          if (event.data.messageType === 'intervention') {
+            this.emitEvent({ type: 'hub_intervention_message', content } as any);
+          } else {
+            this.emitEvent({ type: 'hub_user_message', content } as any);
+          }
         }
       }
     });
@@ -239,7 +243,7 @@ export class AgentContainer {
 
     // Create sandboxed iframe
     this.iframe = document.createElement('iframe');
-    this.iframe.setAttribute('sandbox', 'allow-scripts allow-forms');
+    this.iframe.setAttribute('sandbox', 'allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox');
     // Always delegate all permissions via Permissions Policy.
     // This doesn't grant access — it allows the iframe to REQUEST these APIs.
     // The browser's own permission prompt is the security boundary.
@@ -399,7 +403,13 @@ export class AgentContainer {
     const updatePosition = () => {
       if (!this.iframe || !this.activePaneEl) return;
       const rect = this.activePaneEl.getBoundingClientRect();
-      this.iframe.style.cssText = `position:fixed;left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;height:${rect.height}px;border:none;z-index:10;`;
+      // When pane is hidden (display:none → zero rect), hide iframe with display:none
+      // so iOS Safari doesn't sample its background color for browser chrome.
+      if (rect.width === 0 && rect.height === 0) {
+        this.iframe.style.cssText = 'display:none;';
+      } else {
+        this.iframe.style.cssText = `position:fixed;left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;height:${rect.height}px;border:none;z-index:10;`;
+      }
     };
 
     updatePosition();
@@ -420,7 +430,7 @@ export class AgentContainer {
     }
     this.activePaneEl = null;
     if (this.iframe) {
-      this.iframe.style.cssText = 'position:fixed;left:-10000px;top:0;width:1px;height:1px;overflow:hidden;border:none;';
+      this.iframe.style.cssText = 'display:none;';
     }
 
     // Set visibility and emit event
@@ -448,7 +458,7 @@ export class AgentContainer {
     }, '*');
   }
 
-  sendUserMessage(content: string, workerId?: string): void {
+  sendUserMessage(content: string, workerId?: string, options?: { messageType?: string }): void {
     if (this._hubPersistInfo && this.hubClient && this.hubConnectionId) {
       // Hub-persisted agent: route message through hub
       // Track locally-sent message to avoid duplicate rendering from broadcast
@@ -465,6 +475,7 @@ export class AgentContainer {
       type: 'user_message',
       content,
       workerId,
+      messageType: options?.messageType,
     }, '*');
   }
 
@@ -678,7 +689,7 @@ export class AgentContainer {
     } else if (data.type === 'request_view_state' && data.state) {
       // Agent is requesting a view state change (legacy - no id)
       // Validate state value at runtime (TypeScript types don't protect at runtime)
-      const validStates = ['min', 'max', 'ui-only', 'chat-only'];
+      const validStates = ['min', 'max', 'ui-only', 'chat-only', 'web-max', 'web-only'];
       if (!validStates.includes(data.state)) {
         console.warn(`[agent:${this.id}] Invalid view state requested: ${data.state}`);
         return;
@@ -703,7 +714,7 @@ export class AgentContainer {
       this.emitEvent({ type: 'notify_user', message: data.message } as any);
     } else if (data.type === 'view_state_request' && data.id && data.state) {
       // Agent is requesting a view state change via tool (with request id)
-      const validStates = ['min', 'max', 'ui-only', 'chat-only'];
+      const validStates = ['min', 'max', 'ui-only', 'chat-only', 'web-max', 'web-only'];
       if (!validStates.includes(data.state)) {
         this.iframe?.contentWindow?.postMessage({
           type: 'view_state_response',

@@ -19,6 +19,7 @@
   "dependencies": {
     "@flo-monster/core": "workspace:*",
     "jsdom": "^26.1.0",
+    "playwright-core": "^1.52.0",
     "ses": "^1.14.0",
     "web-push": "^3.6.7",
     "ws": "^8.18.0"

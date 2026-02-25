@@ -166,12 +166,12 @@ export function createProxyServer(port: number = PORT, upstream: string = UPSTRE
         console.log(`[proxy] ${req.method} ${req.url} -> ${route.provider} -> ${statusCode}`);
       });
 
-      upstreamReq.on('error', (err: Error) => {
-        console.error(`[proxy] Upstream error: ${err.message}`);
+      upstreamReq.on('error', (err: Error & { code?: string }) => {
+        console.error(`[proxy] Upstream error: ${err.code || ''} ${err.message}`, err);
         if (!res.headersSent) {
           res.writeHead(502, { 'Content-Type': 'application/json' });
         }
-        res.end(JSON.stringify({ error: 'Bad gateway', message: err.message }));
+        res.end(JSON.stringify({ error: 'Bad gateway', message: err.message || err.code || 'Unknown error' }));
         console.log(`[proxy] ${req.method} ${req.url} -> 502`);
       });
 

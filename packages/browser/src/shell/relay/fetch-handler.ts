@@ -235,14 +235,16 @@ export async function checkNetworkApproval(
     return cached.approved;
   }
 
-  // Show dialog
-  if (!ctx.approvalDialog) {
-    const dialog = new NetworkApprovalDialog();
+  // Show dialog — use local variable because ctx.approvalDialog may be a
+  // snapshot (e.g. from object spread) that won't reflect setApprovalDialog()
+  let dialog = ctx.approvalDialog;
+  if (!dialog) {
+    dialog = new NetworkApprovalDialog();
     ctx.setApprovalDialog(dialog);
   }
 
   const detail = extractToolDetail(toolName, input);
-  const result = await ctx.approvalDialog!.show(agentName, toolName, detail);
+  const result = await dialog.show(agentName, toolName, detail);
 
   // Cache the result
   if (result.persistent || !result.approved) {

@@ -51,6 +51,7 @@ function createMockSession(overrides?: Partial<SerializedSession>): SerializedSe
 
 function createMockClient(): ConnectedClient {
   return {
+    id: 'test-client-id',
     ws: { send: vi.fn(), readyState: WebSocket.OPEN } as any,
     authenticated: true,
     remoteAddress: '127.0.0.1',

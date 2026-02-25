@@ -142,3 +142,16 @@ export interface AgentLoopEventMessage {
   agentId: string;
   event: AgentEvent;
 }
+
+/** Browser -> Hub: request intervention on a browse session */
+export interface BrowseInterveneRequestMessage {
+  type: 'browse_intervene_request';
+  agentId: string;
+  mode: 'visible' | 'private';
+}
+
+/** Browser -> Hub: release intervention */
+export interface BrowseInterveneReleaseMessage {
+  type: 'browse_intervene_release';
+  agentId: string;
+}

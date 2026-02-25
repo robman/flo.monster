@@ -228,19 +228,30 @@ export async function executeSrcdocBuiltinTool(
     }
 
     case 'view_state': {
-      // Delegate to the existing requestViewState mechanism
+      // Apply view state directly on the agent container
       const state = input.state as string;
-      if (state) {
-        const iframe = agent.getIframeElement();
-        if (iframe?.contentWindow) {
-          iframe.contentWindow.postMessage({
-            type: 'request_view_state',
-            agentId: agent.id,
-            state,
-          }, '*');
-        }
+      const validStates = ['min', 'max', 'ui-only', 'chat-only', 'web-max', 'web-only'];
+      if (!state || !validStates.includes(state)) {
+        throw new Error('Invalid view state: ' + state);
       }
-      return { ok: true };
+      agent.setViewState(state as any, 'agent');
+      return { ok: true, state };
+    }
+
+    case 'browse': {
+      // Route through hub client — browse requires a headless browser on the hub
+      if (!ctx.hubClient) {
+        throw new Error('browse requires a hub connection');
+      }
+      const hubId = ctx.hubClient.findToolHub('browse');
+      if (!hubId) {
+        throw new Error('browse tool not available on connected hub');
+      }
+      const result = await ctx.hubClient.executeTool(hubId, 'browse', input, agent.id);
+      if (result.is_error) {
+        throw new Error(result.result);
+      }
+      return result.result;
     }
 
     default:

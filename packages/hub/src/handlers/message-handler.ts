@@ -2,6 +2,7 @@
  * Message handling: routing, tool calls, fetch proxy, auth, audit logging.
  */
 
+import { join } from 'node:path';
 import type { HubConfig } from '../config.js';
 import { validateToken } from '../auth.js';
 import { getToolDefinitions, executeTool } from '../tools/index.js';
@@ -14,6 +15,15 @@ import type { ConnectedClient } from '../server.js';
 import type { BrowserToolRouter } from '../browser-tool-router.js';
 import type { Scheduler } from '../scheduler.js';
 import type { PushManager } from '../push-manager.js';
+import type { BrowseSessionManager } from '../browse-session.js';
+import type { BrowseProxy } from '../browse-proxy.js';
+import type { ScreencastManager } from '../screencast-manager.js';
+import type { StreamServer } from '../stream-server.js';
+import type { InterveneManager } from '../intervene-manager.js';
+import type { InterveneInputExecutor } from '../intervene-input.js';
+import { getAccessibilityTree, getPageMetadata } from '../utils/page-accessibility.js';
+import { executeBrowse, type BrowseInput, type BrowseDeps } from '../tools/browse.js';
+import type { AccessibilityNode } from '../utils/accessibility-tree.js';
 import { sendWsMessage } from '../utils/ws-utils.js';
 import { executeSafeFetch } from '../utils/safe-fetch.js';
 import {
@@ -42,6 +52,8 @@ import type {
   RestoreAgentMessage,
   PersistAgentMessage,
   ApiProxyRequestMessage,
+  BrowseInterveneRequestMessage,
+  BrowseInterveneReleaseMessage,
 } from './types.js';
 import { getProviderRoute } from '../http-server.js';
 import { streamCliEvents, type CliProxyRequest } from '../cli-proxy.js';
@@ -126,6 +138,11 @@ async function handleToolCall(
   clients: Set<ConnectedClient>,
   hookExecutor?: HookExecutor,
   skillManager?: HubSkillManager,
+  browseSessionManager?: BrowseSessionManager,
+  browseProxy?: BrowseProxy,
+  signingSecret?: Buffer,
+  hubUrl?: string,
+  agentStorePath?: string,
 ): Promise<void> {
   auditLog({
     timestamp: new Date().toISOString(),
@@ -135,11 +152,34 @@ async function handleToolCall(
     details: { id: message.id },
   });
 
-  // Create approval function that routes through connected clients
-  const approvalFn = (skill: { name: string; description: string; content: string }) =>
-    requestSkillApproval(clients, skill);
+  let result;
 
-  const result = await executeTool(message.name, message.input as ToolInput, config, hookExecutor, skillManager, approvalFn);
+  // Browse tool needs special handling — it requires session manager, proxy, and per-agent element refs
+  if (message.name === 'browse' && browseSessionManager && browseProxy && config.tools.browse?.enabled) {
+    // Use the agent's persistent ID (sent from browser) instead of a random per-connection ID
+    const browseAgentId = (message as any).agentId || `anon-${client.id}`;
+    // Compute files root for this agent's browse session
+    const fileRoot = agentStorePath
+      ? join(agentStorePath, browseAgentId, 'files')
+      : undefined;
+    const browseDeps: BrowseDeps = {
+      sessionManager: browseSessionManager,
+      proxy: browseProxy,
+      config: config.tools.browse,
+      agentId: browseAgentId,
+      elementRefs: browseSessionManager.getElementRefs(browseAgentId),
+      fileRoot,
+      hubUrl,
+      signingSecret,
+    };
+    result = await executeBrowse(message.input as BrowseInput, browseDeps);
+  } else {
+    // Create approval function that routes through connected clients
+    const approvalFn = (skill: { name: string; description: string; content: string }) =>
+      requestSkillApproval(clients, skill);
+
+    result = await executeTool(message.name, message.input as ToolInput, config, hookExecutor, skillManager, approvalFn);
+  }
 
   auditLog({
     timestamp: new Date().toISOString(),
@@ -351,6 +391,108 @@ async function handleApiProxyRequest(
 }
 
 // ============================================================================
+// Intervention notification helper
+// ============================================================================
+
+/**
+ * Build a notification message for the agent after intervention ends.
+ */
+async function buildInterveneNotification(
+  session: { mode: 'visible' | 'private'; eventLog: Array<{ timestamp: number; kind: string; details: Record<string, unknown> }> },
+  browseSessionManager: BrowseSessionManager,
+  agentId: string,
+): Promise<string> {
+  const parts: string[] = [];
+
+  if (session.mode === 'visible') {
+    parts.push('[User intervention ended — visible mode]');
+    if (session.eventLog.length > 0) {
+      parts.push('');
+      parts.push('User actions during intervention:');
+      // Summarize events: collapse consecutive mousemoves/scrolls, format concisely
+      const summarized: string[] = [];
+      let i = 0;
+      while (i < session.eventLog.length) {
+        const ev = session.eventLog[i];
+
+        if (ev.kind === 'mousemove') {
+          // Collapse consecutive mousemoves — keep only the last position
+          let lastMove = ev;
+          while (i + 1 < session.eventLog.length && session.eventLog[i + 1].kind === 'mousemove') {
+            i++;
+            lastMove = session.eventLog[i];
+          }
+          const x = lastMove.details.x ?? lastMove.details.clientX ?? '?';
+          const y = lastMove.details.y ?? lastMove.details.clientY ?? '?';
+          summarized.push(`  - mouse moved to (${x}, ${y})`);
+        } else if (ev.kind === 'scroll') {
+          // Collapse consecutive scrolls — report net direction
+          let netDeltaX = 0;
+          let netDeltaY = 0;
+          let j = i;
+          while (j < session.eventLog.length && session.eventLog[j].kind === 'scroll') {
+            netDeltaX += (session.eventLog[j].details.deltaX as number) || 0;
+            netDeltaY += (session.eventLog[j].details.deltaY as number) || 0;
+            j++;
+          }
+          i = j - 1; // will be incremented at end of loop
+          const dirs: string[] = [];
+          if (netDeltaY < 0) dirs.push('up');
+          if (netDeltaY > 0) dirs.push('down');
+          if (netDeltaX < 0) dirs.push('left');
+          if (netDeltaX > 0) dirs.push('right');
+          summarized.push(`  - scrolled ${dirs.length > 0 ? dirs.join(' and ') : '(no net movement)'}`);
+        } else if (ev.kind === 'click' || ev.kind === 'dblclick' || ev.kind === 'contextmenu') {
+          const x = ev.details.x ?? ev.details.clientX ?? '?';
+          const y = ev.details.y ?? ev.details.clientY ?? '?';
+          summarized.push(`  - ${ev.kind} at (${x}, ${y})`);
+        } else if (ev.kind === 'keydown' || ev.kind === 'keyup' || ev.kind === 'keypress') {
+          const key = ev.details.key ?? ev.details.code ?? '?';
+          summarized.push(`  - ${ev.kind} "${key}"`);
+        } else if (ev.kind === 'input') {
+          const value = ev.details.value !== undefined ? `: "${ev.details.value}"` : '';
+          summarized.push(`  - input${value}`);
+        } else {
+          // Other events: show kind with concise details
+          const { kind: _kind, ...rest } = ev.details;
+          const detailStr = Object.keys(rest).length > 0
+            ? ` ${JSON.stringify(rest)}`
+            : '';
+          summarized.push(`  - ${ev.kind}${detailStr}`);
+        }
+        i++;
+      }
+      parts.push(...summarized);
+    }
+  } else {
+    parts.push('[User completed private interaction — input details hidden]');
+  }
+
+  // Get fresh page state
+  try {
+    const page = browseSessionManager.getPage(agentId);
+    if (page) {
+      const metadata = await getPageMetadata(page);
+      // Use the agent's real element refs so the agent can reference
+      // elements from the notification snapshot in subsequent browse calls
+      const elementRefs = browseSessionManager.getElementRefs(agentId);
+      elementRefs.clear();
+      const tree = await getAccessibilityTree(page, elementRefs);
+      parts.push('');
+      parts.push('Current page state:');
+      parts.push(metadata);
+      parts.push('');
+      parts.push(tree);
+    }
+  } catch (err) {
+    parts.push('');
+    parts.push(`[Failed to capture page state: ${(err as Error).message}]`);
+  }
+
+  return parts.join('\n');
+}
+
+// ============================================================================
 // Main message router
 // ============================================================================
 
@@ -370,6 +512,14 @@ export async function handleMessage(
   agentStorePath?: string,
   scheduler?: Scheduler,
   pushManager?: PushManager,
+  browseSessionManager?: BrowseSessionManager,
+  browseProxy?: BrowseProxy,
+  signingSecret?: Buffer,
+  hubUrl?: string,
+  screencastManager?: ScreencastManager,
+  streamServer?: StreamServer,
+  interveneManager?: InterveneManager,
+  interveneInputExecutor?: InterveneInputExecutor,
 ): Promise<void> {
   // Handle authentication
   if (message.type === 'auth') {
@@ -477,7 +627,7 @@ export async function handleMessage(
 
   // Handle tool requests
   if (message.type === 'tool_request') {
-    await handleToolCall(client, message as ToolCallMessage, config, clients, hookExecutor, skillManager);
+    await handleToolCall(client, message as ToolCallMessage, config, clients, hookExecutor, skillManager, browseSessionManager, browseProxy, signingSecret, hubUrl, agentStorePath);
     return;
   }
 
@@ -500,6 +650,10 @@ export async function handleMessage(
       browserToolRouter,
       scheduler,
       pushManager,
+      browseSessionManager,
+      browseProxy,
+      signingSecret,
+      hubUrl,
     });
     return;
   }
@@ -521,7 +675,7 @@ export async function handleMessage(
   // Handle agent_action
   if (message.type === 'agent_action') {
     const actionMsg = message as AgentActionMessage;
-    handleAgentAction(client, actionMsg, agents, agentStore);
+    handleAgentAction(client, actionMsg, agents, agentStore, browseSessionManager);
     browserToolRouter?.setLastActiveClient(actionMsg.agentId, client);
     return;
   }
@@ -619,6 +773,150 @@ export async function handleMessage(
   // Handle API proxy request (Mode 3: browser routes API through hub WS)
   if (message.type === 'api_proxy_request') {
     await handleApiProxyRequest(client, message as unknown as ApiProxyRequestMessage, config);
+    return;
+  }
+
+  // Handle browse_intervene_request
+  if (message.type === 'browse_intervene_request') {
+    const { agentId, mode } = message as unknown as BrowseInterveneRequestMessage;
+
+    if (!interveneManager || !browseSessionManager) {
+      sendWsMessage(client.ws, {
+        type: 'browse_intervene_denied',
+        agentId,
+        reason: 'Intervention not available',
+      });
+      return;
+    }
+
+    // Verify agent has an active browse session
+    if (!browseSessionManager.hasSession(agentId)) {
+      sendWsMessage(client.ws, {
+        type: 'browse_intervene_denied',
+        agentId,
+        reason: 'No active browse session for this agent',
+      });
+      return;
+    }
+
+    // Try to start intervention
+    const session = interveneManager.requestIntervene(agentId, client.id, mode);
+    if (!session) {
+      sendWsMessage(client.ws, {
+        type: 'browse_intervene_denied',
+        agentId,
+        reason: 'Another user is already intervening',
+      });
+      return;
+    }
+
+    // Pause the agent runner if it exists
+    const runner = agents.get(agentId);
+    if (runner) {
+      runner.interveneStart();
+    }
+
+    sendWsMessage(client.ws, {
+      type: 'browse_intervene_granted',
+      agentId,
+      mode,
+    });
+    return;
+  }
+
+  // Handle browse_intervene_release
+  if (message.type === 'browse_intervene_release') {
+    const { agentId } = message as unknown as BrowseInterveneReleaseMessage;
+
+    if (!interveneManager || !browseSessionManager) {
+      return;
+    }
+
+    const session = interveneManager.release(agentId, client.id);
+    if (!session) {
+      return; // Not intervening or wrong client
+    }
+
+    // Clear focus tracking state
+    interveneInputExecutor?.clearFocusState(agentId);
+
+    // Build notification for the agent
+    const notification = await buildInterveneNotification(session, browseSessionManager, agentId);
+
+    // Resume the agent runner (hub-persisted agents)
+    const runner = agents.get(agentId);
+    if (runner && runner.isIntervenePaused) {
+      runner.interveneEnd(notification);
+    }
+
+    // Always include notification so browser can render the intervention block.
+    // Hub-persisted agents also get it via runner.interveneEnd above (for LLM processing).
+    // Browser-routed agents use the notification to send to the worker.
+    sendWsMessage(client.ws, {
+      type: 'browse_intervene_ended',
+      agentId,
+      reason: 'released',
+      notification,
+    });
+    return;
+  }
+
+  // Handle browse_stream_request
+  if (message.type === 'browse_stream_request') {
+    const { agentId } = message as { type: string; agentId: string };
+
+    if (!screencastManager || !streamServer || !browseSessionManager) {
+      sendWsMessage(client.ws, {
+        type: 'browse_stream_error',
+        agentId,
+        error: 'Browse streaming not available',
+      });
+      return;
+    }
+
+    // Verify agent has an active browse session
+    if (!browseSessionManager.hasSession(agentId)) {
+      sendWsMessage(client.ws, {
+        type: 'browse_stream_error',
+        agentId,
+        error: 'No active browse session for this agent',
+      });
+      return;
+    }
+
+    // Generate token and respond with stream port info
+    const token = streamServer.generateToken(agentId, client.id);
+    const streamPort = streamServer.port;
+
+    // Get viewport dimensions from browse session config
+    const viewport = config.tools.browse?.viewport ?? { width: 1419, height: 813 };
+
+    sendWsMessage(client.ws, {
+      type: 'browse_stream_token',
+      agentId,
+      token,
+      streamPort,
+      viewport,
+      ...(config.trustProxy && config.publicHost ? { streamUrl: `wss://${config.publicHost}/stream?token=${token}` } : {}),
+    });
+    return;
+  }
+
+  // Handle browse_stream_stop
+  if (message.type === 'browse_stream_stop') {
+    const { agentId } = message as { type: string; agentId: string };
+
+    if (streamServer) {
+      streamServer.closeConnectionForClient(client.id);
+    }
+    if (screencastManager) {
+      await screencastManager.stopAllForClient(client.id);
+    }
+
+    sendWsMessage(client.ws, {
+      type: 'browse_stream_stopped',
+      agentId,
+    });
     return;
   }
 

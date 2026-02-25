@@ -7,6 +7,7 @@ import { isPrivateIP } from '../utils/safe-fetch.js';
 
 function createMockClient(authenticated = true): ConnectedClient {
   return {
+    id: 'test-client-id',
     ws: { send: vi.fn(), readyState: WebSocket.OPEN } as any,
     authenticated,
     remoteAddress: '127.0.0.1',

@@ -1018,14 +1018,14 @@
       // Handle view_state tool for changing the view layout
       if (name === 'view_state') {
         var state = input.state;
-        var validStates = ['max', 'ui-only', 'chat-only'];
+        var validStates = ['max', 'ui-only', 'chat-only', 'web-max', 'web-only'];
         if (validStates.indexOf(state) === -1) {
           resolve({ content: 'Invalid view state. Must be one of: ' + validStates.join(', '), is_error: true });
           return;
         }
-        // Check if on mobile (max not available)
-        if (state === 'max' && isMobile) {
-          resolve({ content: 'Cannot use "max" view state on mobile. Use "ui-only" or "chat-only" instead.', is_error: true });
+        // Check if on mobile (max/web-max not available)
+        if ((state === 'max' || state === 'web-max') && isMobile) {
+          resolve({ content: 'Cannot use "' + state + '" view state on mobile. Use "ui-only", "chat-only", or "web-only" instead.', is_error: true });
           return;
         }
         setPendingWithTimeout(id, { resolve: function(data) {
@@ -1173,7 +1173,7 @@
   }
 
   // ===== 8. Agentic Loop =====
-  async function runAgenticLoop(agentConfig, initialMessage) {
+  async function runAgenticLoop(agentConfig, initialMessage, messageType) {
     if (loopRunning) return;
     loopRunning = true;
     stopped = false;
@@ -1191,7 +1191,9 @@
       return { name: t.name, description: t.description, input_schema: t.input_schema };
     });
 
-    turnMessages.push({ role: 'user', content: [{ type: 'text', text: initialMessage }] });
+    var userMsg = { role: 'user', content: [{ type: 'text', text: initialMessage }] };
+    if (messageType) userMsg.messageType = messageType;
+    turnMessages.push(userMsg);
 
     var running = true;
     var MAX_ITERATIONS = 200;
@@ -1260,6 +1262,12 @@
         body = buildGeminiRequestBody(agentConfig, turnMessages, tools);
       } else {
         body = buildOpenAIRequestBody(agentConfig, turnMessages, tools);
+      }
+
+      // Attach message type metadata to payload (not inside messages — APIs reject unknown fields).
+      // api-handler reads and strips this before forwarding, applies it to stored messages.
+      if (messageType) {
+        body._firstUserMessageType = messageType;
       }
 
       var assistantContent = [];
@@ -1461,7 +1469,9 @@
         var nextEvent = eventQueue.shift();
         setTimeout(function() {
           if (config && !paused && !stopped) {
-            runAgenticLoop(config, nextEvent).catch(function(err) {
+            var nextContent = typeof nextEvent === 'string' ? nextEvent : nextEvent.content;
+            var nextMsgType = typeof nextEvent === 'string' ? undefined : nextEvent.messageType;
+            runAgenticLoop(config, nextContent, nextMsgType).catch(function(err) {
               emitEvent({ type: 'error', error: 'Loop error: ' + String(err) });
             });
           }
@@ -1538,6 +1548,7 @@
         if (!loopRunning && config) {
           (async function() {
             var promptToUse = data.content;
+            var msgType = data.messageType;
             var hookResult = await checkHook('user_prompt_submit', { prompt: data.content });
             if (hookResult.decision === 'deny') {
               emitEvent({ type: 'error', error: 'User prompt denied' + (hookResult.reason ? ': ' + hookResult.reason : '') });
@@ -1547,14 +1558,14 @@
               promptToUse = hookResult.modifiedPrompt;
             }
             if (!paused) {
-              runAgenticLoop(config, promptToUse).catch(function(err) {
+              runAgenticLoop(config, promptToUse, msgType).catch(function(err) {
                 emitEvent({ type: 'error', error: 'Loop error: ' + String(err) });
               });
             }
           })();
         } else if (loopRunning) {
           if (eventQueue.length < MAX_EVENT_QUEUE_SIZE) {
-            eventQueue.push(data.content);
+            eventQueue.push({ content: data.content, messageType: data.messageType });
           }
         }
         break;

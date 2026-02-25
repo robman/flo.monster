@@ -12,9 +12,12 @@ import type { HubConfig } from '../config.js';
 import type { HookExecutor } from '../hook-executor.js';
 import { unpackFilesToDisk, packFilesFromDisk } from '../tools/hub-files.js';
 import { getToolDefinitions } from '../tools/index.js';
+import { browseToolDef } from '../tools/browse.js';
 import { scheduleToolDef } from '../tools/schedule.js';
 import { contextSearchToolDef } from '../tools/context-search.js';
 import { hubRunJsToolDef } from '../tools/hub-runjs.js';
+import type { BrowseSessionManager } from '../browse-session.js';
+import type { BrowseProxy } from '../browse-proxy.js';
 import type { HubSkillManager } from '../skill-manager.js';
 import type { BrowserToolRouter } from '../browser-tool-router.js';
 import type { Scheduler } from '../scheduler.js';
@@ -51,6 +54,10 @@ export interface AgentHandlerDeps {
   browserToolRouter?: BrowserToolRouter;
   scheduler?: Scheduler;
   pushManager?: PushManager;
+  browseSessionManager?: BrowseSessionManager;
+  browseProxy?: BrowseProxy;
+  signingSecret?: Buffer;
+  hubUrl?: string;
 }
 
 /**
@@ -108,6 +115,11 @@ export function createRunnerDeps(
     pushManager: deps.pushManager,
     runner,
     agentDataDir,
+    browseSessionManager: deps.browseSessionManager,
+    browseProxy: deps.browseProxy,
+    browseConfig: deps.hubConfig.tools.browse,
+    signingSecret: deps.signingSecret,
+    hubUrl: deps.hubUrl,
     onFileChange: (path: string, content: string | undefined, action: 'write' | 'delete') => {
       for (const c of deps.clients) {
         if (c.subscribedAgents.has(hubAgentId)) {
@@ -126,7 +138,7 @@ export function createRunnerDeps(
   // Compute hub tool definitions to inject for the LLM
   // These are tools the hub can execute but aren't in the browser agent's config.tools
   const hubToolDefs = [
-    ...getToolDefinitions(deps.hubConfig, true),  // bash, filesystem, skill tools
+    ...getToolDefinitions(deps.hubConfig, true),  // bash, filesystem, browse (if enabled), skill tools
     ...(deps.scheduler ? [scheduleToolDef] : []),
     contextSearchToolDef,
     hubRunJsToolDef,
@@ -218,6 +230,9 @@ export async function handlePersistAgent(
 
     // Generate a unique hub agent ID
     const hubAgentId = `hub-${session.agentId}-${Date.now()}`;
+
+    // Transfer browse session from browser agentId to hubAgentId (if one exists)
+    deps.browseSessionManager?.rekeySession(session.agentId, hubAgentId);
 
     // Store per-agent API key if provided
     let perAgentApiKey: string | undefined;
@@ -390,7 +405,8 @@ export function handleSubscribeAgent(
     // Content is ContentBlock[] — pass through directly.
     // Fallback for legacy string format from old serialized sessions.
     const messages = serialized.conversation.map((msg: any) => ({
-      role: msg.role,
+      ...(msg.role ? { role: msg.role } : {}),
+      ...(msg.type ? { type: msg.type } : {}),
       content: Array.isArray(msg.content) ? msg.content : [{ type: 'text', text: String(msg.content) }],
     }));
     sendWsMessage(client.ws, {
@@ -435,6 +451,7 @@ export function handleAgentAction(
   message: AgentActionMessage,
   agents: Map<string, HeadlessAgentRunner>,
   agentStore?: AgentStore,
+  browseSessionManager?: BrowseSessionManager,
 ): void {
   // For 'remove', always delete from disk even if runner not in memory
   if (message.action === 'remove') {
@@ -443,6 +460,8 @@ export function handleAgentAction(
       runner.kill();
       agents.delete(message.agentId);
     }
+    // Clean up headless browse session
+    browseSessionManager?.closeSession(message.agentId).catch(() => {});
     agentStore?.delete(message.agentId).catch(err => {
       console.error(`[AgentHandler] Failed to delete agent ${message.agentId} from disk:`, err);
     });
@@ -472,6 +491,8 @@ export function handleAgentAction(
     case 'kill':
       runner.kill();
       agents.delete(message.agentId);
+      // Clean up headless browse session
+      browseSessionManager?.closeSession(message.agentId).catch(() => {});
       break;
   }
 

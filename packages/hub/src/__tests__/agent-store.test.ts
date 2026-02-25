@@ -222,6 +222,38 @@ describe('AgentStore', () => {
       await store.init();
       await expect(store.delete('../escape')).rejects.toThrow('Invalid hub agent ID');
     });
+
+    it('should remove sandbox directory when sandboxBasePath is set', async () => {
+      const sandboxBase = join(storeDir, '..', `sandbox-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+      await mkdir(sandboxBase, { recursive: true });
+      const storeWithSandbox = new AgentStore(storeDir, sandboxBase);
+      await storeWithSandbox.init();
+
+      // Save an agent and create its sandbox directory
+      await storeWithSandbox.save('sandbox-agent', createMockSession('sandbox-agent'), createMockState());
+      const sandboxDir = join(sandboxBase, 'sandbox-agent');
+      await mkdir(sandboxDir, { recursive: true });
+      await writeFile(join(sandboxDir, 'test-file.txt'), 'hello', 'utf-8');
+      expect(existsSync(sandboxDir)).toBe(true);
+
+      // Delete should remove both agent store dir and sandbox dir
+      await storeWithSandbox.delete('sandbox-agent');
+      expect(storeWithSandbox.exists('sandbox-agent')).toBe(false);
+      expect(existsSync(sandboxDir)).toBe(false);
+
+      // Clean up
+      await rm(sandboxBase, { recursive: true, force: true });
+    });
+
+    it('should not error when sandbox directory does not exist', async () => {
+      const sandboxBase = join(storeDir, '..', `sandbox-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+      const storeWithSandbox = new AgentStore(storeDir, sandboxBase);
+      await storeWithSandbox.init();
+
+      await storeWithSandbox.save('no-sandbox', createMockSession('no-sandbox'), createMockState());
+      // Don't create the sandbox directory — delete should still succeed
+      await expect(storeWithSandbox.delete('no-sandbox')).resolves.toBeUndefined();
+    });
   });
 
   describe('list()', () => {

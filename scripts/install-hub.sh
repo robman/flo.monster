@@ -517,6 +517,9 @@ generate_hub_json() {
         "/proc",
         "/sys"
       ]
+    },
+    "browse": {
+      "enabled": true
     }
   },
   "fetchProxy": {
@@ -579,7 +582,7 @@ After=network.target
 Type=simple
 User=flo-hub
 WorkingDirectory=/home/flo-hub/flo.monster/packages/hub
-ExecStart=/bin/bash -c 'source /home/flo-hub/setup-env.sh && exec node node_modules/.bin/tsx src/index.ts'
+ExecStart=/bin/bash -c 'source /home/flo-hub/setup-env.sh && exec ./node_modules/.bin/tsx src/index.ts'
 Restart=always
 RestartSec=5
 PrivateTmp=true
@@ -815,6 +818,7 @@ run_multipass_install() {
     --cpus "$MULTIPASS_CPUS" \
     --memory "$MULTIPASS_MEMORY" \
     --disk "$MULTIPASS_DISK" \
+    --timeout 600 \
     --cloud-init "$cloud_init_file"
 
   # Clean up cloud-init file immediately (contains auth token)
@@ -941,7 +945,16 @@ install_apt_packages() {
   info "Updating package lists..."
   sudo apt-get update -qq
 
-  local packages=(git curl build-essential jq)
+  # Core build tools + fonts for headless Chrome (realistic font fingerprint)
+  # + Chromium system deps for playwright-core headless browser
+  local packages=(
+    git curl build-essential jq
+    fonts-liberation2 fonts-noto-core fonts-dejavu-extra
+    fonts-freefont-ttf fontconfig
+    libatk1.0-0t64 libatk-bridge2.0-0t64 libcups2t64
+    libatspi2.0-0t64 libxcomposite1 libxdamage1 libxfixes3
+    libxrandr2 libgbm1 libcairo2 libpango-1.0-0 libasound2t64
+  )
 
   if [[ "$SETUP_TYPE" == "domain" ]]; then
     # Add Caddy's official repository
@@ -956,6 +969,41 @@ install_apt_packages() {
   info "Installing system packages: ${packages[*]}..."
   sudo apt-get install -y -qq "${packages[@]}"
   success "System packages installed"
+
+  # Configure fontconfig for headless Chrome: prefer Liberation Sans for Arial
+  # (more metric-compatible than default Arimo mapping) and enable desktop-like rendering
+  local fontconf_dir="/home/flo-hub/.config/fontconfig"
+  sudo -u flo-hub mkdir -p "$fontconf_dir"
+  sudo -u flo-hub tee "$fontconf_dir/fonts.conf" > /dev/null <<'FONTCONF'
+<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
+<fontconfig>
+  <!-- Prefer Liberation Sans for Arial requests (better metric compatibility) -->
+  <alias>
+    <family>Arial</family>
+    <prefer><family>Liberation Sans</family></prefer>
+  </alias>
+  <alias>
+    <family>Times New Roman</family>
+    <prefer><family>Liberation Serif</family></prefer>
+  </alias>
+  <alias>
+    <family>Courier New</family>
+    <prefer><family>Liberation Mono</family></prefer>
+  </alias>
+
+  <!-- Desktop-like text rendering: full hinting + subpixel anti-aliasing -->
+  <match target="font">
+    <edit name="hinting" mode="assign"><bool>true</bool></edit>
+    <edit name="hintstyle" mode="assign"><const>hintfull</const></edit>
+    <edit name="antialias" mode="assign"><bool>true</bool></edit>
+    <edit name="rgba" mode="assign"><const>rgb</const></edit>
+    <edit name="lcdfilter" mode="assign"><const>lcddefault</const></edit>
+  </match>
+</fontconfig>
+FONTCONF
+  sudo fc-cache -f > /dev/null 2>&1
+  success "Fontconfig configured for headless Chrome"
 }
 
 # -----------------------------------------------------------------------------
@@ -1008,7 +1056,10 @@ nvm use ${NODE_VERSION}
 cd ${repo_dir}
 git pull --ff-only
 pnpm install --frozen-lockfile
+cd ${repo_dir}/packages/hub
+npx playwright-core install chromium
 REPOUPDATE
+
   else
     info "Cloning repository..."
     sudo -u flo-hub git clone "$FLO_REPO_URL" "$repo_dir"
@@ -1023,7 +1074,10 @@ nvm use ${NODE_VERSION}
 
 cd ${repo_dir}
 pnpm install --frozen-lockfile
+cd ${repo_dir}/packages/hub
+npx playwright-core install chromium
 REPOBUILD
+
   fi
 
   success "Repository cloned and dependencies installed"
@@ -1393,7 +1447,7 @@ print_direct_results() {
     echo "  flo-admin config      View configuration"
     echo "  flo-admin uninstall   Remove the hub"
   else
-    echo "  Start manually:    sudo -u flo-hub bash -c 'source ~/setup-env.sh && cd ~/flo.monster/packages/hub && node node_modules/.bin/tsx src/index.ts'"
+    echo "  Start manually:    sudo -u flo-hub bash -c 'source ~/setup-env.sh && cd ~/flo.monster/packages/hub && ./node_modules/.bin/tsx src/index.ts'"
   fi
 
   echo

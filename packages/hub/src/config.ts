@@ -38,6 +38,32 @@ export const DEFAULT_RESTRICTED_BLOCKLIST: string[] = [
   'iptables', 'ufw', 'nft',
 ];
 
+export interface BrowseToolConfig {
+  enabled: boolean;
+  maxConcurrentSessions: number;
+  sessionTimeoutMinutes: number;
+  allowedDomains: string[];
+  blockedDomains: string[];
+  blockPrivateIPs: boolean;
+  rateLimitPerDomain: number;  // requests per minute per domain, 0 = unlimited
+  viewport: { width: number; height: number };
+  stream?: {
+    enabled?: boolean;       // default true when browse enabled
+    port?: number;           // Fixed port for stream server. Default: 0 (OS-assigned)
+    maxConnections?: number; // default 5
+    maxFPS?: number;         // default 15
+    initialQuality?: number; // default 40
+    maxQuality?: number;     // default 80
+    tokenTTLSeconds?: number; // default 30
+  };
+  /** Log page console output and JS errors to hub stdout */
+  debug?: boolean;
+  /** Disable anti-headless-detection stealth patches (for debugging) */
+  stealth?: boolean;  // default true
+  /** Skip specific stealth sections: 'userAgentData', 'workerPatch', 'permissions' */
+  skipStealthSections?: string[];
+}
+
 export interface HubToolsConfig {
   bash: {
     enabled: boolean;
@@ -51,6 +77,7 @@ export interface HubToolsConfig {
     allowedPaths: string[];
     blockedPaths?: string[];
   };
+  browse?: BrowseToolConfig;
 }
 
 export interface FetchProxyConfig {
@@ -116,6 +143,8 @@ export interface HubConfig {
   };
   /** Whether to trust X-Forwarded-For header for client IP (only enable behind trusted proxy) */
   trustProxy?: boolean;
+  /** Allowed CORS origins. When set, restricts Access-Control-Allow-Origin to these origins. Unset = '*' (allow all). */
+  allowedOrigins?: string[];
   /** Push notification configuration */
   pushConfig?: PushConfig;
   /** CLI provider configuration (e.g., use Claude Code CLI instead of API key) */
@@ -304,6 +333,16 @@ export function getDefaultConfig(): HubConfig {
           '/sys',
         ],
       },
+      browse: {
+        enabled: true,
+        maxConcurrentSessions: 3,
+        sessionTimeoutMinutes: 30,
+        allowedDomains: [],
+        blockedDomains: [],
+        blockPrivateIPs: true,
+        rateLimitPerDomain: 10,
+        viewport: { width: 1419, height: 813 },
+      },
     },
     fetchProxy: {
       enabled: true,
@@ -417,6 +456,25 @@ export function validateConfig(config: unknown): config is HubConfig {
   }
   if (!Array.isArray(filesystem.allowedPaths)) {
     return false;
+  }
+
+  // Optional browse tool config
+  if (tools.browse !== undefined) {
+    if (typeof tools.browse !== 'object' || tools.browse === null) {
+      return false;
+    }
+    const browse = tools.browse as Record<string, unknown>;
+    if (typeof browse.enabled !== 'boolean') return false;
+    if (typeof browse.maxConcurrentSessions !== 'number' || browse.maxConcurrentSessions < 1) return false;
+    if (typeof browse.sessionTimeoutMinutes !== 'number' || browse.sessionTimeoutMinutes < 1) return false;
+    if (!Array.isArray(browse.allowedDomains)) return false;
+    if (!Array.isArray(browse.blockedDomains)) return false;
+    if (typeof browse.blockPrivateIPs !== 'boolean') return false;
+    if (typeof browse.rateLimitPerDomain !== 'number' || browse.rateLimitPerDomain < 0) return false;
+    if (typeof browse.viewport !== 'object' || browse.viewport === null) return false;
+    const viewport = browse.viewport as Record<string, unknown>;
+    if (typeof viewport.width !== 'number' || viewport.width < 1) return false;
+    if (typeof viewport.height !== 'number' || viewport.height < 1) return false;
   }
 
   // Fetch proxy config
@@ -547,6 +605,18 @@ export function validateConfig(config: unknown): config is HubConfig {
     }
   }
 
+  // Optional allowedOrigins
+  if (c.allowedOrigins !== undefined) {
+    if (!Array.isArray(c.allowedOrigins)) {
+      return false;
+    }
+    for (const origin of c.allowedOrigins) {
+      if (typeof origin !== 'string' || origin.length === 0) {
+        return false;
+      }
+    }
+  }
+
   return true;
 }
 
@@ -576,6 +646,14 @@ export async function loadConfig(configPath?: string): Promise<HubConfig> {
         filesystem: {
           ...defaults.tools.filesystem,
           ...((loadedObj.tools as Record<string, unknown>)?.filesystem as Record<string, unknown> || {}),
+        },
+        browse: {
+          ...defaults.tools.browse,
+          ...((loadedObj.tools as Record<string, unknown>)?.browse as Record<string, unknown> || {}),
+          viewport: {
+            ...(defaults.tools.browse?.viewport || { width: 1419, height: 813 }),
+            ...(((loadedObj.tools as Record<string, unknown>)?.browse as Record<string, unknown>)?.viewport as Record<string, unknown> || {}),
+          },
         },
       },
       fetchProxy: {

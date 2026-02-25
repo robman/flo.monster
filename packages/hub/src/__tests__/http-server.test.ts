@@ -124,7 +124,7 @@ describe('HTTP Server', () => {
 
       expect(response.status).toBe(204);
       expect(response.headers['access-control-allow-origin']).toBe('*');
-      expect(response.headers['access-control-allow-methods']).toBe('POST, OPTIONS');
+      expect(response.headers['access-control-allow-methods']).toBe('GET, POST, OPTIONS');
       expect(response.headers['access-control-allow-headers']).toContain('x-hub-token');
       expect(response.headers['access-control-allow-private-network']).toBe('true');
       expect(response.headers['access-control-max-age']).toBe('86400');
@@ -1129,6 +1129,192 @@ describe('HTTP Server', () => {
 
         expect(response.status).toBe(503);
       } finally {
+        await new Promise<void>((resolve) => tempServer.close(() => resolve()));
+      }
+    });
+  });
+
+  describe('CORS origin restriction', () => {
+    it('should return Access-Control-Allow-Origin: * when no allowedOrigins configured', async () => {
+      // Default config has no allowedOrigins
+      const response = await makeRequest('GET', '/api/status');
+
+      expect(response.status).toBe(200);
+      expect(response.headers['access-control-allow-origin']).toBe('*');
+      // Should NOT have Vary: Origin when using wildcard
+      expect(response.headers['vary']).toBeUndefined();
+    });
+
+    it('should reflect matching origin when allowedOrigins is set', async () => {
+      // Create a server with allowedOrigins
+      const corsConfig = { ...config, allowedOrigins: ['https://flo.monster', 'https://app.flo.monster'] };
+      const corsRateLimiter = new FailedAuthRateLimiter(3, 5);
+      const corsContext: HttpHandlerContext = { config: corsConfig, rateLimiter: corsRateLimiter };
+      const handler = createHttpRequestHandler(corsContext);
+
+      const tempServer = createServer(handler);
+      let tempPort: number;
+
+      await new Promise<void>((resolve) => {
+        tempServer.listen(0, '127.0.0.1', () => {
+          const addr = tempServer.address();
+          if (addr && typeof addr === 'object') {
+            tempPort = addr.port;
+          }
+          resolve();
+        });
+      });
+
+      try {
+        const response = await new Promise<{ status: number; headers: Record<string, string>; body: string }>((resolve, reject) => {
+          const req = httpRequest(
+            {
+              hostname: '127.0.0.1',
+              port: tempPort,
+              path: '/api/status',
+              method: 'GET',
+              headers: {
+                'Origin': 'https://flo.monster',
+              },
+            },
+            (res) => {
+              let data = '';
+              res.on('data', (chunk) => { data += chunk; });
+              res.on('end', () => {
+                const responseHeaders: Record<string, string> = {};
+                for (const [key, value] of Object.entries(res.headers)) {
+                  if (typeof value === 'string') responseHeaders[key] = value;
+                  else if (Array.isArray(value)) responseHeaders[key] = value[0];
+                }
+                resolve({ status: res.statusCode ?? 0, headers: responseHeaders, body: data });
+              });
+            },
+          );
+          req.on('error', reject);
+          req.end();
+        });
+
+        expect(response.status).toBe(200);
+        expect(response.headers['access-control-allow-origin']).toBe('https://flo.monster');
+        expect(response.headers['vary']).toBe('Origin');
+      } finally {
+        corsRateLimiter.destroy();
+        await new Promise<void>((resolve) => tempServer.close(() => resolve()));
+      }
+    });
+
+    it('should return first allowed origin when request origin does not match', async () => {
+      const corsConfig = { ...config, allowedOrigins: ['https://flo.monster'] };
+      const corsRateLimiter = new FailedAuthRateLimiter(3, 5);
+      const corsContext: HttpHandlerContext = { config: corsConfig, rateLimiter: corsRateLimiter };
+      const handler = createHttpRequestHandler(corsContext);
+
+      const tempServer = createServer(handler);
+      let tempPort: number;
+
+      await new Promise<void>((resolve) => {
+        tempServer.listen(0, '127.0.0.1', () => {
+          const addr = tempServer.address();
+          if (addr && typeof addr === 'object') {
+            tempPort = addr.port;
+          }
+          resolve();
+        });
+      });
+
+      try {
+        const response = await new Promise<{ status: number; headers: Record<string, string> }>((resolve, reject) => {
+          const req = httpRequest(
+            {
+              hostname: '127.0.0.1',
+              port: tempPort,
+              path: '/api/status',
+              method: 'GET',
+              headers: {
+                'Origin': 'https://evil.com',
+              },
+            },
+            (res) => {
+              let data = '';
+              res.on('data', (chunk) => { data += chunk; });
+              res.on('end', () => {
+                const responseHeaders: Record<string, string> = {};
+                for (const [key, value] of Object.entries(res.headers)) {
+                  if (typeof value === 'string') responseHeaders[key] = value;
+                  else if (Array.isArray(value)) responseHeaders[key] = value[0];
+                }
+                resolve({ status: res.statusCode ?? 0, headers: responseHeaders });
+              });
+            },
+          );
+          req.on('error', reject);
+          req.end();
+        });
+
+        expect(response.status).toBe(200);
+        expect(response.headers['access-control-allow-origin']).toBe('https://flo.monster');
+        expect(response.headers['vary']).toBe('Origin');
+      } finally {
+        corsRateLimiter.destroy();
+        await new Promise<void>((resolve) => tempServer.close(() => resolve()));
+      }
+    });
+
+    it('should handle OPTIONS preflight with matching origin', async () => {
+      const corsConfig = { ...config, allowedOrigins: ['https://flo.monster'] };
+      const corsRateLimiter = new FailedAuthRateLimiter(3, 5);
+      const corsContext: HttpHandlerContext = { config: corsConfig, rateLimiter: corsRateLimiter };
+      const handler = createHttpRequestHandler(corsContext);
+
+      const tempServer = createServer(handler);
+      let tempPort: number;
+
+      await new Promise<void>((resolve) => {
+        tempServer.listen(0, '127.0.0.1', () => {
+          const addr = tempServer.address();
+          if (addr && typeof addr === 'object') {
+            tempPort = addr.port;
+          }
+          resolve();
+        });
+      });
+
+      try {
+        const response = await new Promise<{ status: number; headers: Record<string, string> }>((resolve, reject) => {
+          const req = httpRequest(
+            {
+              hostname: '127.0.0.1',
+              port: tempPort,
+              path: '/api/status',
+              method: 'OPTIONS',
+              headers: {
+                'Origin': 'https://flo.monster',
+              },
+            },
+            (res) => {
+              let data = '';
+              res.on('data', (chunk) => { data += chunk; });
+              res.on('end', () => {
+                const responseHeaders: Record<string, string> = {};
+                for (const [key, value] of Object.entries(res.headers)) {
+                  if (typeof value === 'string') responseHeaders[key] = value;
+                  else if (Array.isArray(value)) responseHeaders[key] = value[0];
+                }
+                resolve({ status: res.statusCode ?? 0, headers: responseHeaders });
+              });
+            },
+          );
+          req.on('error', reject);
+          req.end();
+        });
+
+        expect(response.status).toBe(204);
+        expect(response.headers['access-control-allow-origin']).toBe('https://flo.monster');
+        expect(response.headers['vary']).toBe('Origin');
+        expect(response.headers['access-control-allow-methods']).toBe('GET, POST, OPTIONS');
+        expect(response.headers['access-control-allow-private-network']).toBe('true');
+      } finally {
+        corsRateLimiter.destroy();
         await new Promise<void>((resolve) => tempServer.close(() => resolve()));
       }
     });

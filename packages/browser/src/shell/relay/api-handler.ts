@@ -1,5 +1,5 @@
 import type { IframeToShell, ShellToIframe } from '@flo-monster/core';
-import { buildContextMessages } from '@flo-monster/core';
+import { buildContextMessages, toApiMessage, MESSAGE_API_FIELDS, GEMINI_API_FIELDS, compressBrowseResults } from '@flo-monster/core';
 import type { AgentStorageProvider } from '../../storage/agent-storage.js';
 import type { ProxySettings } from './types.js';
 import { extractTerseSummary, appendTerseSummary, generateTurnId, loadTerseContext } from './context-manager.js';
@@ -82,6 +82,10 @@ export async function handleApiRequest(
     // Detect which field to use based on the payload structure.
     const isGeminiNative = !payload.messages && Array.isArray(payload.contents);
 
+    // Extract and strip message type metadata (not an API field — worker attaches it for storage only)
+    const firstUserMessageType = payload._firstUserMessageType as string | undefined;
+    delete payload._firstUserMessageType;
+
     // The request's messages/contents are the current turn — tag with turnId.
     const rawTurnItems = (isGeminiNative ? payload.contents : payload.messages) || [];
     // Keep original format for the current request
@@ -89,32 +93,74 @@ export async function handleApiRequest(
     // For storage: normalize Gemini messages to canonical format (role: assistant/user, content blocks)
     // so context works when switching providers. Also filter out system messages — the worker
     // injects the system prompt on every request, so storing it duplicates it each turn.
+    const isOpenAI = provider === 'openai' || provider === 'ollama';
     const turnMessagesForStorage = (isGeminiNative
       ? rawTurnItems.map((m: Record<string, unknown>) => ({ ...normalizeGeminiMessage(m), turnId }))
-      : turnMessages
+      : isOpenAI
+        ? normalizeOpenAIMessages(rawTurnItems as Array<Record<string, unknown>>).map(m => ({ ...m, turnId }))
+        : turnMessages
     ).filter((m: Record<string, unknown>) => m.role !== 'system');
 
+    // Apply message type to the first user message in storage (e.g. type: 'intervention').
+    // IMPORTANT: Replace the array element instead of mutating — turnMessagesForStorage shares
+    // object references with turnMessages, which is used to build the API request payload.
+    // Mutating would leak the type field into the API body (causing 400 from strict providers).
+    if (firstUserMessageType) {
+      for (let i = 0; i < turnMessagesForStorage.length; i++) {
+        if (turnMessagesForStorage[i].role === 'user') {
+          turnMessagesForStorage[i] = { ...turnMessagesForStorage[i], type: firstUserMessageType };
+          break;
+        }
+      }
+    }
+
     // Build context messages using the unified strategy
-    const contextMessages = buildContextMessages(
+    const rawContextMessages = buildContextMessages(
       terseEntries,
       storedMessages as Array<Record<string, unknown>>,
       { contextMode, maxTerseEntries: 50, fullContextTurns },
     );
+    // Compress stale browse accessibility trees — only the latest tree is actionable
+    const contextMessages = compressBrowseResults(rawContextMessages as Array<Record<string, unknown>>);
 
     if (isGeminiNative) {
-      // Gemini native: context messages are in internal format (role/content blocks).
-      // Convert them to Gemini contents format before prepending.
+      // Gemini native: context messages are in canonical format (role/content blocks).
+      // Convert to Gemini contents format: text → text parts, tool_use → functionCall,
+      // tool_result → functionResponse. Mirrors convertMessagesToGemini() in core adapter.
+      let lastToolUses = new Map<string, string>();
       const contextContents = contextMessages.map((m: Record<string, unknown>) => {
         const role = m.role === 'assistant' ? 'model' : 'user';
         const content = m.content as Array<Record<string, unknown>> | undefined;
         const parts: Array<Record<string, unknown>> = [];
         if (content) {
-          for (const block of content) {
-            if (block.type === 'text') {
-              parts.push({ text: block.text });
+          if (role === 'model') {
+            const newToolUses = new Map<string, string>();
+            for (const block of content) {
+              if (block.type === 'text') {
+                parts.push({ text: block.text });
+              } else if (block.type === 'tool_use') {
+                newToolUses.set(block.id as string, block.name as string);
+                parts.push({ functionCall: { name: block.name, args: block.input } });
+              }
             }
-            // Tool use/result blocks in context are best represented as text summaries
-            // since we don't have the full functionCall/Response metadata.
+            lastToolUses = newToolUses;
+          } else {
+            for (const block of content) {
+              if (block.type === 'text') {
+                parts.push({ text: block.text });
+              } else if (block.type === 'tool_result') {
+                const name = lastToolUses.get(block.tool_use_id as string) || 'unknown';
+                const rawContent = typeof block.content === 'string' ? block.content : JSON.stringify(block.content);
+                let response: Record<string, unknown>;
+                try {
+                  const parsed = JSON.parse(rawContent as string);
+                  response = typeof parsed === 'object' && parsed !== null ? parsed : { result: rawContent };
+                } catch {
+                  response = { result: rawContent };
+                }
+                parts.push({ functionResponse: { name, response } });
+              }
+            }
           }
         }
         return parts.length > 0 ? { role, parts } : null;
@@ -134,14 +180,22 @@ export async function handleApiRequest(
           allContents.push({ ...typedItem });
         }
       }
-      // Strip turnId from contents
-      payload.contents = allContents.map(
-        ({ turnId: _tid, ...rest }: Record<string, unknown>) => rest,
-      );
+      // Allowlist: only Gemini API fields pass through. Internal metadata
+      // (turnId, type, messageType, timestamp, etc.) is automatically excluded.
+      payload.contents = allContents.map(m => toApiMessage(m, GEMINI_API_FIELDS));
     } else {
-      // OpenAI/Anthropic: inject context into messages array
-      payload.messages = [...contextMessages, ...turnMessages].map(
-        ({ turnId: _tid, ...rest }: Record<string, unknown>) => rest,
+      // Context messages are stored in canonical (Anthropic) format. For OpenAI/Ollama,
+      // convert them back to wire format (tool_calls, role:'tool', etc.) since the OpenAI
+      // API doesn't understand tool_use/tool_result content blocks.
+      const apiContextMessages = isOpenAI
+        ? canonicalToOpenAIMessages(contextMessages as Array<Record<string, unknown>>)
+        : contextMessages;
+
+      // Allowlist: only Anthropic/OpenAI API fields pass through. Internal metadata
+      // (turnId, type, messageType, timestamp, etc.) is automatically excluded.
+      // Content block fields (type: 'text', etc.) are nested inside content and unaffected.
+      payload.messages = [...apiContextMessages, ...turnMessages].map(
+        m => toApiMessage(m, MESSAGE_API_FIELDS),
       );
     }
 
@@ -466,6 +520,148 @@ function parseGeminiAssistantFromSSE(sseText: string): { message: Record<string,
 }
 
 /**
+ * Normalize an OpenAI-format message to canonical format
+ * (role: user/assistant, content blocks) for cross-provider context storage.
+ *
+ * OpenAI wire format differs from canonical:
+ *   - content can be string, null, or array
+ *   - tool calls are in tool_calls array (not content blocks)
+ *   - tool results use role:'tool' + tool_call_id (not role:'user' + tool_result block)
+ *
+ * We merge consecutive tool-result messages into the preceding user message
+ * to match the Anthropic conversation structure.
+ */
+export function normalizeOpenAIMessages(messages: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+  const result: Array<Record<string, unknown>> = [];
+
+  for (const m of messages) {
+    const role = m.role as string;
+
+    if (role === 'tool') {
+      // OpenAI tool results: merge into preceding user message as tool_result content block.
+      // If no preceding user message, create one.
+      let target = result[result.length - 1];
+      if (!target || target.role !== 'user') {
+        target = { role: 'user', content: [] };
+        result.push(target);
+      }
+      (target.content as Array<Record<string, unknown>>).push({
+        type: 'tool_result',
+        tool_use_id: m.tool_call_id,
+        content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content ?? ''),
+      });
+    } else if (role === 'assistant') {
+      const content: Array<Record<string, unknown>> = [];
+      // Text content
+      if (typeof m.content === 'string' && m.content) {
+        content.push({ type: 'text', text: m.content });
+      }
+      // Tool calls → tool_use blocks
+      if (Array.isArray(m.tool_calls)) {
+        for (const tc of m.tool_calls as Array<Record<string, unknown>>) {
+          const fn = tc.function as Record<string, unknown> | undefined;
+          let input = {};
+          try { if (fn?.arguments) input = JSON.parse(fn.arguments as string); } catch { /* empty */ }
+          content.push({
+            type: 'tool_use',
+            id: tc.id as string,
+            name: fn?.name as string,
+            input,
+          });
+        }
+      }
+      result.push({ role: 'assistant', content });
+    } else if (role === 'user') {
+      const content: Array<Record<string, unknown>> = [];
+      if (typeof m.content === 'string' && m.content) {
+        content.push({ type: 'text', text: m.content });
+      } else if (Array.isArray(m.content)) {
+        content.push(...(m.content as Array<Record<string, unknown>>));
+      }
+      result.push({ role: 'user', content });
+    }
+    // Skip system messages (already filtered separately)
+  }
+
+  return result;
+}
+
+/**
+ * Convert canonical (Anthropic) format context messages back to OpenAI wire format.
+ * This is the reverse of normalizeOpenAIMessages() — used when building the API
+ * request payload for OpenAI/Ollama from stored canonical context.
+ *
+ * Conversions:
+ *   - assistant content with tool_use blocks → tool_calls array + content: null/string
+ *   - user content with tool_result blocks → separate role:'tool' messages
+ *   - other messages pass through unchanged
+ */
+export function canonicalToOpenAIMessages(messages: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+  const result: Array<Record<string, unknown>> = [];
+
+  for (const m of messages) {
+    const role = m.role as string;
+    const content = m.content;
+
+    if (!Array.isArray(content)) {
+      // String content or null — pass through as-is
+      result.push({ ...m });
+      continue;
+    }
+
+    const blocks = content as Array<Record<string, unknown>>;
+
+    if (role === 'assistant') {
+      // Convert tool_use blocks → tool_calls array, text blocks → content string
+      const textParts: string[] = [];
+      const toolCalls: Array<Record<string, unknown>> = [];
+
+      for (const block of blocks) {
+        if (block.type === 'text') {
+          textParts.push(block.text as string);
+        } else if (block.type === 'tool_use') {
+          toolCalls.push({
+            id: block.id,
+            type: 'function',
+            function: {
+              name: block.name,
+              arguments: JSON.stringify(block.input ?? {}),
+            },
+          });
+        }
+      }
+
+      const msg: Record<string, unknown> = { role: 'assistant' };
+      msg.content = textParts.length > 0 ? textParts.join('') : null;
+      if (toolCalls.length > 0) {
+        msg.tool_calls = toolCalls;
+      }
+      result.push(msg);
+    } else if (role === 'user') {
+      // Split: tool_result blocks → separate role:'tool' messages, rest stays as user
+      const toolResults = blocks.filter(b => b.type === 'tool_result');
+      const otherBlocks = blocks.filter(b => b.type !== 'tool_result');
+
+      if (otherBlocks.length > 0) {
+        result.push({ role: 'user', content: otherBlocks });
+      }
+
+      for (const tr of toolResults) {
+        result.push({
+          role: 'tool',
+          tool_call_id: tr.tool_use_id,
+          content: typeof tr.content === 'string' ? tr.content : JSON.stringify(tr.content ?? ''),
+        });
+      }
+    } else {
+      result.push({ ...m });
+    }
+  }
+
+  return result;
+}
+
+/**
  * Normalize a Gemini-format message (role: model, parts) to canonical format
  * (role: assistant/user, content blocks) for cross-provider context storage.
  */
@@ -496,7 +692,7 @@ function normalizeGeminiMessage(m: Record<string, unknown>): Record<string, unkn
       });
     }
   }
-  return { role, content };
+  return { role, content, ...(m.type ? { type: m.type } : {}) };
 }
 
 export async function loadConversationContext(

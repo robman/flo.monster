@@ -42,7 +42,7 @@ function sanitizeId(id: string): string {
 }
 
 export class AgentStore {
-  constructor(private storePath: string) {}
+  constructor(private storePath: string, private sandboxBasePath?: string) {}
 
   /**
    * Ensure the store directory exists
@@ -106,6 +106,18 @@ export class AgentStore {
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
         throw err;
+      }
+    }
+
+    // Also clean up the per-agent sandbox directory if configured
+    if (this.sandboxBasePath) {
+      const sandboxDir = join(this.sandboxBasePath, safeId);
+      try {
+        await rm(sandboxDir, { recursive: true, force: true });
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+          throw err;
+        }
       }
     }
   }

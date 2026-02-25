@@ -115,6 +115,10 @@ export class ConversationView {
       this.addUserMessage((event as any).content);
       return;
     }
+    if (eventType === 'hub_intervention_message') {
+      this.addInterventionBlock((event as any).content);
+      return;
+    }
     if (eventType === 'budget_exceeded') {
       this.showBudgetExceeded((event as any).reason, (event as any).message);
       return;
@@ -284,6 +288,28 @@ export class ConversationView {
     this.scrollToBottom();
   }
 
+  /** Show an intervention notification as a collapsed details block. */
+  addInterventionBlock(text: string): void {
+    const details = document.createElement('details');
+    details.className = 'intervention-block';
+
+    const summary = document.createElement('summary');
+    summary.className = 'intervention-block__header';
+    summary.innerHTML = '<span class="intervention-block__icon">\u2709</span> User intervention';
+    details.appendChild(summary);
+
+    const body = document.createElement('pre');
+    body.className = 'intervention-block__body';
+    body.textContent = text;
+    details.appendChild(body);
+
+    this.messagesEl.appendChild(details);
+    // Reset current message so the next text_delta creates a new assistant block
+    // below the intervention, not appended to the previous assistant message.
+    this.currentMessageEl = null;
+    this.scrollToBottom();
+  }
+
   setAgentId(agentId: string): void {
     this.agentId = agentId;
   }
@@ -338,7 +364,7 @@ export class ConversationView {
    * Messages follow the Anthropic API format: [{role, content: [...blocks]}]
    * Only renders the last MAX_VISIBLE_TURNS turns.
    */
-  renderHistory(messages: Array<{role: string, content: Array<Record<string, unknown>>}>): void {
+  renderHistory(messages: Array<{role?: string, type?: string, content: Array<Record<string, unknown>>}>): void {
     this.clear();
 
     // Count turns (user messages = turns)
@@ -360,7 +386,22 @@ export class ConversationView {
       const content: Array<Record<string, unknown>> = typeof msg.content === 'string'
         ? [{ type: 'text', text: msg.content }]
         : msg.content;
-      if (msg.role === 'user') {
+      // Check type field first (new format), then role (legacy)
+      if ((msg as any).type === 'announcement' || msg.role === 'system') {
+        // UI-only info messages (announcements, legacy system messages)
+        for (const block of content) {
+          if (block.type === 'text') {
+            this.showInfo(block.text as string);
+          }
+        }
+      } else if ((msg as any).type === 'intervention') {
+        // Intervention notifications — collapsed details block
+        for (const block of content) {
+          if (block.type === 'text') {
+            this.addInterventionBlock(block.text as string);
+          }
+        }
+      } else if (msg.role === 'user') {
         // User messages: look for text blocks or tool_result blocks
         for (const block of content) {
           if (block.type === 'text') {
@@ -406,13 +447,6 @@ export class ConversationView {
               const inputStr = typeof block.input === 'string' ? block.input : JSON.stringify(block.input, null, 2);
               this.updateToolInput(block.id as string, inputStr);
             }
-          }
-        }
-      } else if (msg.role === 'system') {
-        // System info messages (e.g. "persisted to hub") — UI-only, not sent to LLM
-        for (const block of content) {
-          if (block.type === 'text') {
-            this.showInfo(block.text as string);
           }
         }
       }

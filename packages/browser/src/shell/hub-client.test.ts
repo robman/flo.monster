@@ -353,6 +353,76 @@ describe('HubClient', () => {
       expect(result.is_error).toBe(true);
     });
 
+    it('includes agentId in tool_request when provided', async () => {
+      const connectPromise = client.connect('ws://localhost:3002', 'Test Hub');
+
+      await vi.waitFor(() => expect(mockWebSockets.length).toBe(1));
+
+      const ws = mockWebSockets[0];
+      ws.simulateMessage({
+        type: 'auth_result',
+        success: true,
+        hubId: 'hub-1',
+        hubName: 'Test Hub',
+      });
+
+      const conn = await connectPromise;
+
+      const toolPromise = client.executeTool(conn.id, 'browse', { action: 'navigate', url: 'https://example.com' }, 'my-agent-123');
+
+      await vi.waitFor(() => {
+        const toolReqs = ws.sentMessages.filter(m => m.type === 'tool_request');
+        return toolReqs.length > 0;
+      });
+
+      const toolRequest = ws.sentMessages.find(m => m.type === 'tool_request') as Extract<ShellToHub, { type: 'tool_request' }>;
+      expect(toolRequest.name).toBe('browse');
+      expect(toolRequest.agentId).toBe('my-agent-123');
+
+      // Simulate response
+      ws.simulateMessage({
+        type: 'tool_result',
+        id: toolRequest.id,
+        result: { content: 'navigated' },
+      });
+
+      await toolPromise;
+    });
+
+    it('omits agentId from tool_request when not provided', async () => {
+      const connectPromise = client.connect('ws://localhost:3002', 'Test Hub');
+
+      await vi.waitFor(() => expect(mockWebSockets.length).toBe(1));
+
+      const ws = mockWebSockets[0];
+      ws.simulateMessage({
+        type: 'auth_result',
+        success: true,
+        hubId: 'hub-1',
+        hubName: 'Test Hub',
+      });
+
+      const conn = await connectPromise;
+
+      const toolPromise = client.executeTool(conn.id, 'bash', { command: 'ls' });
+
+      await vi.waitFor(() => {
+        const toolReqs = ws.sentMessages.filter(m => m.type === 'tool_request');
+        return toolReqs.length > 0;
+      });
+
+      const toolRequest = ws.sentMessages.find(m => m.type === 'tool_request') as Extract<ShellToHub, { type: 'tool_request' }>;
+      expect(toolRequest.agentId).toBeUndefined();
+
+      ws.simulateMessage({
+        type: 'tool_result',
+        id: toolRequest.id,
+        result: { content: 'ok' },
+      });
+
+      await toolPromise;
+    });
+
     it('throws when hub not connected', async () => {
       await expect(client.executeTool('nonexistent', 'bash', {})).rejects.toThrow('Hub not connected');
     });

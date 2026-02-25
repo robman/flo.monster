@@ -126,6 +126,34 @@ describe('iframe-template', () => {
       expect(script).toContain("document.querySelector('style[data-flo-default]')");
       expect(script).toContain('defaultStyle.remove()');
     });
+
+    it('includes link interception click handler', () => {
+      const script = generateBootstrapScript('test');
+      expect(script).toContain("document.addEventListener('click', function(e)");
+      expect(script).toContain("el.tagName !== 'A'");
+      expect(script).toContain("e.preventDefault()");
+      expect(script).toContain("javascript:");
+    });
+
+    it('includes window.open override that blocks javascript: URLs', () => {
+      const script = generateBootstrapScript('test');
+      expect(script).toContain('var _origOpen = window.open');
+      expect(script).toContain("window.open = function(url, target, features)");
+      expect(script).toContain("startsWith('javascript:')");
+      expect(script).toContain('noopener');
+    });
+
+    it('link interception allows hash links for in-page navigation', () => {
+      const script = generateBootstrapScript('test');
+      // Verify hash links are allowed through
+      expect(script).toContain("rawHref.charAt(0) === '#'");
+    });
+
+    it('link interception allows data: and blob: URLs', () => {
+      const script = generateBootstrapScript('test');
+      expect(script).toContain("trimmed.startsWith('data:')");
+      expect(script).toContain("trimmed.startsWith('blob:')");
+    });
   });
 
   describe('generateIframeSrcdoc', () => {

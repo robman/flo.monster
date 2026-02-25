@@ -94,4 +94,61 @@ describe('ConversationView conversation_history handling', () => {
     expect(userMsgs[1].textContent).toBe('Block format question');
     expect(assistantMsgs.length).toBe(2);
   });
+
+  it('renders type:announcement via showInfo', () => {
+    const messages = [
+      { type: 'announcement', content: [{ type: 'text', text: 'Agent persisted to hub' }] },
+    ];
+
+    conversation.handleEvent({ type: 'conversation_history', messages } as any);
+
+    const infoMsgs = container.querySelectorAll('.message--info');
+    expect(infoMsgs.length).toBe(1);
+    expect(infoMsgs[0].textContent).toBe('Agent persisted to hub');
+  });
+
+  it('renders type:intervention as collapsed details block', () => {
+    const messages = [
+      { role: 'user', type: 'intervention', content: [{ type: 'text', text: 'User navigated to login page' }] },
+    ];
+
+    conversation.handleEvent({ type: 'conversation_history', messages } as any);
+
+    const blocks = container.querySelectorAll('.intervention-block');
+    expect(blocks.length).toBe(1);
+    // Should be a <details> element (collapsed by default)
+    expect(blocks[0].tagName).toBe('DETAILS');
+    // Summary should say "User intervention"
+    const summary = blocks[0].querySelector('summary');
+    expect(summary!.textContent).toContain('User intervention');
+    // Body should contain the notification text
+    const body = blocks[0].querySelector('.intervention-block__body');
+    expect(body!.textContent).toBe('User navigated to login page');
+  });
+
+  it('renders legacy role:system as info message (backward compat)', () => {
+    const messages = [
+      { role: 'system', content: [{ type: 'text', text: 'Agent persisted to hub as hub-agent-123' }] },
+    ];
+
+    conversation.handleEvent({ type: 'conversation_history', messages } as any);
+
+    const infoMsgs = container.querySelectorAll('.message--info');
+    expect(infoMsgs.length).toBe(1);
+    expect(infoMsgs[0].textContent).toBe('Agent persisted to hub as hub-agent-123');
+  });
+
+  it('regular user and assistant messages still render normally', () => {
+    const messages = [
+      { role: 'user', content: [{ type: 'text', text: 'Hello' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'Hi there!' }] },
+    ];
+
+    conversation.handleEvent({ type: 'conversation_history', messages } as any);
+
+    const userMsgs = container.querySelectorAll('.message--user');
+    const assistantMsgs = container.querySelectorAll('.message--assistant');
+    expect(userMsgs.length).toBe(1);
+    expect(assistantMsgs.length).toBe(1);
+  });
 });

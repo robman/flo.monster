@@ -1094,3 +1094,340 @@ describe('HeadlessAgentRunner active mode (with deps)', () => {
     expect(runner.state).toBe('running');
   });
 });
+
+describe('HeadlessAgentRunner intervene methods', () => {
+  const mockConfig: AgentConfig = {
+    id: 'test-agent',
+    name: 'Test Agent',
+    model: 'claude-sonnet-4-20250514',
+    tools: [],
+    maxTokens: 4096,
+  };
+
+  const createMockSession = (): SerializedSession => ({
+    version: 1,
+    agentId: 'agent-123',
+    config: mockConfig,
+    conversation: [],
+    storage: {},
+    metadata: {
+      createdAt: 1000,
+      serializedAt: 2000,
+      totalTokens: 0,
+      totalCost: 0,
+    },
+  });
+
+  beforeEach(() => {
+    mockRunAgenticLoop.mockReset();
+  });
+
+  it('interveneStart pauses the runner and sets isIntervenePaused', async () => {
+    const runner = new HeadlessAgentRunner(createMockSession());
+    await runner.start();
+    expect(runner.state).toBe('running');
+
+    runner.interveneStart();
+    expect(runner.state).toBe('paused');
+    expect(runner.isIntervenePaused).toBe(true);
+  });
+
+  it('interveneEnd resumes the runner and clears isIntervenePaused', async () => {
+    const runner = new HeadlessAgentRunner(createMockSession());
+    await runner.start();
+    runner.interveneStart();
+    expect(runner.state).toBe('paused');
+
+    runner.interveneEnd('User completed intervention. Page now shows login form.');
+    expect(runner.state).toBe('running');
+    expect(runner.isIntervenePaused).toBe(false);
+  });
+
+  it('interveneEnd is no-op if not intervene-paused', async () => {
+    const runner = new HeadlessAgentRunner(createMockSession());
+    await runner.start();
+
+    // Manually pause (not via intervene)
+    runner.pause();
+    expect(runner.state).toBe('paused');
+    expect(runner.isIntervenePaused).toBe(false);
+
+    runner.interveneEnd('Should not resume');
+    // Should still be paused because it was a manual pause
+    expect(runner.state).toBe('paused');
+  });
+
+  it('interveneEnd queues notification message', async () => {
+    const deps: RunnerDeps = {
+      sendApiRequest: vi.fn(async function* () { yield ''; }),
+      executeToolCall: vi.fn(async () => ({ content: 'ok' })),
+      adapter: {
+        id: 'test',
+        buildRequest: vi.fn(() => ({ url: '/test', headers: {}, body: '{}' })),
+        parseSSEEvent: vi.fn(() => []),
+        extractUsage: vi.fn(() => ({ input_tokens: 0, output_tokens: 0 })),
+        estimateCost: vi.fn(() => ({ inputCost: 0, outputCost: 0, totalCost: 0, currency: 'USD' as const })),
+        resetState: vi.fn(),
+      },
+    };
+
+    mockRunAgenticLoop.mockImplementation(async (_config: AgentConfig, userMsg: string, loopDeps: { emit: (e: AgentEvent) => void }) => {
+      loopDeps.emit({ type: 'text_done', text: 'Acknowledged' });
+      loopDeps.emit({ type: 'turn_end', stopReason: 'end_turn' });
+      return [
+        { role: 'user', content: [{ type: 'text', text: userMsg }] },
+        { role: 'assistant', content: [{ type: 'text', text: 'Acknowledged' }] },
+      ];
+    });
+
+    const runner = new HeadlessAgentRunner(createMockSession(), deps);
+    await runner.start();
+    runner.interveneStart();
+
+    runner.interveneEnd('User navigated to the login page.');
+
+    // The notification should be queued and trigger the agentic loop
+    await vi.waitFor(() => {
+      expect(mockRunAgenticLoop).toHaveBeenCalledTimes(1);
+      expect(runner.busy).toBe(false);
+    });
+
+    expect(mockRunAgenticLoop).toHaveBeenCalledWith(
+      expect.any(Object),
+      'User navigated to the login page.',
+      expect.any(Object),
+      expect.any(Array),
+    );
+  });
+
+  it('isIntervenePaused is false by default', () => {
+    const runner = new HeadlessAgentRunner(createMockSession());
+    expect(runner.isIntervenePaused).toBe(false);
+  });
+});
+
+describe('HeadlessAgentRunner message type system', () => {
+  const mockConfig: AgentConfig = {
+    id: 'test-agent',
+    name: 'Test Agent',
+    model: 'claude-sonnet-4-20250514',
+    tools: [],
+    maxTokens: 4096,
+  };
+
+  const createMockSession = (): SerializedSession => ({
+    version: 1,
+    agentId: 'agent-123',
+    config: mockConfig,
+    conversation: [],
+    storage: {},
+    metadata: {
+      createdAt: 1000,
+      serializedAt: 2000,
+      totalTokens: 0,
+      totalCost: 0,
+    },
+  });
+
+  function createMockDeps(overrides?: Partial<RunnerDeps>): RunnerDeps {
+    return {
+      sendApiRequest: vi.fn(async function* () { yield ''; }),
+      executeToolCall: vi.fn(async () => ({ content: 'ok' })),
+      adapter: {
+        id: 'test',
+        buildRequest: vi.fn(() => ({ url: '/test', headers: {}, body: '{}' })),
+        parseSSEEvent: vi.fn(() => []),
+        extractUsage: vi.fn(() => ({ input_tokens: 0, output_tokens: 0 })),
+        estimateCost: vi.fn(() => ({ inputCost: 0, outputCost: 0, totalCost: 0, currency: 'USD' as const })),
+        resetState: vi.fn(),
+      },
+      ...overrides,
+    };
+  }
+
+  beforeEach(() => {
+    mockRunAgenticLoop.mockReset();
+    mockRunAgenticLoop.mockImplementation(async (_config: AgentConfig, userMsg: string, deps: { emit: (e: AgentEvent) => void }) => {
+      deps.emit({ type: 'text_done', text: 'OK' });
+      deps.emit({ type: 'turn_end', stopReason: 'end_turn' });
+      return [
+        { role: 'user', content: [{ type: 'text', text: userMsg }] },
+        { role: 'assistant', content: [{ type: 'text', text: 'OK' }] },
+      ];
+    });
+  });
+
+  it('addInfoMessage creates announcement with no role', () => {
+    const runner = new HeadlessAgentRunner(createMockSession());
+    runner.addInfoMessage('Agent persisted to hub');
+
+    const history = runner.getMessageHistory();
+    expect(history).toHaveLength(1);
+    expect(history[0].role).toBeUndefined();
+    expect(history[0].type).toBe('announcement');
+    expect(history[0].content).toEqual([{ type: 'text', text: 'Agent persisted to hub' }]);
+  });
+
+  it('interveneEnd creates user message with intervention type', async () => {
+    const deps = createMockDeps();
+    const runner = new HeadlessAgentRunner(createMockSession(), deps);
+    await runner.start();
+    runner.interveneStart();
+
+    runner.interveneEnd('User navigated to login page');
+
+    await vi.waitFor(() => {
+      expect(mockRunAgenticLoop).toHaveBeenCalledTimes(1);
+      expect(runner.busy).toBe(false);
+    });
+
+    // The intervention message should have role:'user' (for LLM) + type:'intervention' (for UI)
+    const history = runner.getMessageHistory();
+    const interventionMsg = history.find(m => m.type === 'intervention');
+    expect(interventionMsg).toBeDefined();
+    expect(interventionMsg!.role).toBe('user');
+    expect(interventionMsg!.type).toBe('intervention');
+  });
+
+  it('intervention while busy: queue is cleared on deferred pause', async () => {
+    const deps = createMockDeps();
+
+    let resolveLoop!: () => void;
+    const loopPromise = new Promise<void>(resolve => { resolveLoop = resolve; });
+
+    mockRunAgenticLoop.mockImplementation(async (_config: AgentConfig, userMsg: string, loopDeps: { emit: (e: AgentEvent) => void }) => {
+      await loopPromise;
+      loopDeps.emit({ type: 'text_done', text: 'OK' });
+      loopDeps.emit({ type: 'turn_end', stopReason: 'end_turn' });
+      return [
+        { role: 'user', content: [{ type: 'text', text: userMsg }] },
+        { role: 'assistant', content: [{ type: 'text', text: 'OK' }] },
+      ];
+    });
+
+    const runner = new HeadlessAgentRunner(createMockSession(), deps);
+    await runner.start();
+
+    // Start a loop to make the runner busy
+    runner.sendMessage('first');
+    await new Promise(r => setTimeout(r, 10));
+    expect(runner.busy).toBe(true);
+
+    // Intervene while busy — interveneStart sets _pauseRequested,
+    // interveneEnd queues the message but resume() is a no-op (state still 'running')
+    runner.interveneStart();
+    runner.interveneEnd('User took control');
+
+    // Resolve the first loop — pause takes effect, queue is cleared
+    resolveLoop();
+    await vi.waitFor(() => {
+      expect(runner.state).toBe('paused');
+      expect(runner.busy).toBe(false);
+    });
+
+    // Loop should only have been called once (the queued intervention was discarded by pause)
+    expect(mockRunAgenticLoop).toHaveBeenCalledTimes(1);
+  });
+
+  it('buildContextForLoop filters out announcements', async () => {
+    const session = createMockSession();
+    session.conversation = [
+      { role: 'user', content: 'Hello' },
+      { role: 'system', content: 'Agent persisted' },  // legacy system msg
+      { role: 'assistant', content: 'Hi!' },
+    ];
+
+    const deps = createMockDeps();
+    const runner = new HeadlessAgentRunner(session, deps);
+    await runner.start();
+
+    runner.sendMessage('Follow up');
+
+    await vi.waitFor(() => {
+      expect(runner.busy).toBe(false);
+    });
+
+    // The existingMessages passed to the loop should NOT include the announcement
+    const callArgs = mockRunAgenticLoop.mock.calls[0];
+    const existingMessages = callArgs[3] as Array<{ role: string }>;
+    expect(existingMessages.every(m => m.role === 'user' || m.role === 'assistant')).toBe(true);
+    // The announcement was converted from role:'system' to type:'announcement' (no role)
+    // and filtered out by buildContextForLoop
+  });
+
+  it('buildContextForLoop includes intervention messages (they have role)', async () => {
+    const session = createMockSession();
+    // Simulate a conversation with an intervention message (has both role and type)
+    session.conversation = [
+      { role: 'user', content: 'Hello' },
+      { role: 'assistant', content: 'Hi!' },
+      { role: 'user', type: 'intervention', content: 'User navigated to login' },
+      { role: 'assistant', content: 'I see the login page' },
+    ];
+
+    const deps = createMockDeps();
+    const runner = new HeadlessAgentRunner(session, deps);
+    await runner.start();
+
+    runner.sendMessage('Follow up');
+
+    await vi.waitFor(() => {
+      expect(runner.busy).toBe(false);
+    });
+
+    // All 4 messages should be in existingMessages (interventions have role:'user')
+    const callArgs = mockRunAgenticLoop.mock.calls[0];
+    const existingMessages = callArgs[3] as Array<{ role: string }>;
+    expect(existingMessages).toHaveLength(4);
+  });
+
+  it('legacy role:system migrates to type:announcement on load', () => {
+    const session = createMockSession();
+    session.conversation = [
+      { role: 'user', content: 'Hello' },
+      { role: 'system', content: 'Agent persisted to hub as hub-agent-123' },
+      { role: 'assistant', content: 'Hi!' },
+    ];
+
+    const runner = new HeadlessAgentRunner(session);
+    const history = runner.getMessageHistory();
+
+    expect(history).toHaveLength(3);
+    // The system message should be migrated to announcement
+    expect(history[1].role).toBeUndefined();
+    expect(history[1].type).toBe('announcement');
+    expect(history[1].content).toEqual([{ type: 'text', text: 'Agent persisted to hub as hub-agent-123' }]);
+  });
+
+  it('serialize includes type field', () => {
+    const runner = new HeadlessAgentRunner(createMockSession());
+    runner.addInfoMessage('Agent persisted');
+
+    const serialized = runner.serialize();
+    const lastMsg = serialized.conversation[serialized.conversation.length - 1] as any;
+    expect(lastMsg.type).toBe('announcement');
+    expect(lastMsg.role).toBeUndefined();
+  });
+
+  it('type field survives serialize/deserialize roundtrip', () => {
+    const session = createMockSession();
+    session.conversation = [
+      { role: 'user', content: 'Hello' },
+      { role: 'user', type: 'intervention', content: 'User took control' },
+      { type: 'announcement', content: 'Agent persisted' },
+    ];
+
+    const runner1 = new HeadlessAgentRunner(session);
+    const serialized = runner1.serialize();
+    const runner2 = new HeadlessAgentRunner(serialized);
+    const history = runner2.getMessageHistory();
+
+    expect(history).toHaveLength(3);
+    expect(history[0].role).toBe('user');
+    expect(history[0].type).toBeUndefined();
+    expect(history[1].role).toBe('user');
+    expect(history[1].type).toBe('intervention');
+    expect(history[2].role).toBeUndefined();
+    expect(history[2].type).toBe('announcement');
+  });
+});

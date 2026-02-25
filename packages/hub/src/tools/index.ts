@@ -5,6 +5,7 @@
 import { bashToolDef, executeBash, type BashInput } from './bash.js';
 import { filesystemToolDef, executeFilesystem, type FilesystemInput } from './filesystem.js';
 import { skillToolDefs, isSkillTool, executeSkillTool } from './skill-tools.js';
+import { browseToolDef } from './browse.js';
 import type { HubConfig } from '../config.js';
 import type { HookExecutor } from '../hook-executor.js';
 import type { HubSkillManager } from '../skill-manager.js';
@@ -18,6 +19,7 @@ export { hubFilesToolDef, executeHubFiles, validateFilePath, unpackFilesToDisk, 
 export { scheduleToolDef, executeScheduleTool, type ScheduleToolInput } from './schedule.js';
 export { contextSearchToolDef, executeHubContextSearch } from './context-search.js';
 export { hubRunJsToolDef, executeHubRunJs, type HubRunJsDeps, type RunJsLogEntry } from './hub-runjs.js';
+export { browseToolDef, executeBrowse, type BrowseInput, type BrowseDeps } from './browse.js';
 
 export interface ToolDef {
   name: string;
@@ -48,6 +50,10 @@ export function getToolDefinitions(config: HubConfig, includeSkillTools = true):
 
   if (config.tools.filesystem.enabled) {
     tools.push(filesystemToolDef);
+  }
+
+  if (config.tools.browse?.enabled) {
+    tools.push(browseToolDef);
   }
 
   // Add skill tools (always enabled when requested)

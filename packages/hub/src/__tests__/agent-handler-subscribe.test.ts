@@ -25,6 +25,7 @@ const mockConfig: AgentConfig = {
 
 function createMockClient(): ConnectedClient {
   return {
+    id: 'test-client-id',
     ws: {
       readyState: WebSocket.OPEN,
       send: vi.fn(),

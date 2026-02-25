@@ -106,11 +106,11 @@ export const BUILTIN_TOOL_DEFS: ToolDef[] = [
     },
     {
       name: 'view_state',
-      description: 'Change the view layout. States: "max" (UI + chat side by side), "ui-only" (UI fullscreen, chat hidden), "chat-only" (chat fullscreen, UI hidden). Note: "max" is not available on mobile devices - use "ui-only" or "chat-only" instead.',
+      description: 'Change the view layout. States: "max" (UI + chat side by side), "ui-only" (UI fullscreen, chat hidden), "chat-only" (chat fullscreen, UI hidden), "web-max" (live browser viewport + chat, desktop only), "web-only" (live browser viewport fullscreen). "max"/"web-max" are not available on mobile. "web-max"/"web-only" require an active browse session.',
       input_schema: {
         type: 'object',
         properties: {
-          state: { type: 'string', enum: ['max', 'ui-only', 'chat-only'], description: 'Target view state' },
+          state: { type: 'string', enum: ['max', 'ui-only', 'chat-only', 'web-max', 'web-only'], description: 'Target view state' },
         },
         required: ['state'],
       },

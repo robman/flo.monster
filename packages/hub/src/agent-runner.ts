@@ -17,7 +17,7 @@ import type {
   ProviderAdapter,
   TerseEntry,
 } from '@flo-monster/core';
-import { runAgenticLoop, extractTerseSummary, buildContextMessages } from '@flo-monster/core';
+import { runAgenticLoop, extractTerseSummary, buildContextMessages, toApiMessage, compressBrowseResults } from '@flo-monster/core';
 import type { LoopDeps } from '@flo-monster/core';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -51,15 +51,16 @@ export class HeadlessAgentRunner {
   private _state: RunnerState = 'pending';
   private eventCallbacks: ((event: RunnerEvent) => void)[] = [];
   private agentEventCallbacks: ((event: AgentEvent) => void)[] = [];
-  private messageHistory: Array<{ role: 'user' | 'assistant' | 'system'; content: ContentBlock[]; timestamp: number; turnId?: string }> = [];
+  private messageHistory: Array<{ role?: 'user' | 'assistant'; type?: string; content: ContentBlock[]; timestamp: number; turnId?: string }> = [];
   private terseLog: TerseEntry[] = [];
   private nextTurnId = 1;
   private createdAt: number;
   private totalTokens = 0;
   private totalCost = 0;
   private _busy = false;
-  private _messageQueue: string[] = [];
+  private _messageQueue: Array<{ message: string; type?: string }> = [];
   private _pauseRequested = false;
+  private _intervenePaused = false;
   private _stopRequested = false;
   private deps?: RunnerDeps;
   private domState?: SerializedDomState;
@@ -151,26 +152,41 @@ export class HeadlessAgentRunner {
       for (const msg of session.conversation) {
         if (msg && typeof msg === 'object') {
           const m = msg as Record<string, unknown>;
-          if (m.role === 'user' || m.role === 'assistant' || m.role === 'system') {
-            let content: ContentBlock[];
-            if (typeof m.content === 'string') {
-              // Legacy string format — wrap as text block
-              content = m.content ? [{ type: 'text' as const, text: m.content }] : [];
-            } else if (Array.isArray(m.content)) {
-              // Already ContentBlock[] — preserve as-is
-              content = m.content as ContentBlock[];
-            } else {
-              content = [{ type: 'text' as const, text: String(m.content) }];
-            }
-            // Skip empty messages (no blocks at all)
-            if (content.length > 0) {
-              this.messageHistory.push({
-                role: m.role as 'user' | 'assistant' | 'system',
-                content,
-                timestamp: this.createdAt,
-                ...(m.turnId ? { turnId: m.turnId as string } : {}),
-              });
-            }
+
+          let content: ContentBlock[];
+          if (typeof m.content === 'string') {
+            content = m.content ? [{ type: 'text' as const, text: m.content }] : [];
+          } else if (Array.isArray(m.content)) {
+            content = m.content as ContentBlock[];
+          } else {
+            content = [{ type: 'text' as const, text: String(m.content) }];
+          }
+
+          // Skip empty messages
+          if (content.length === 0) continue;
+
+          if (m.role === 'system') {
+            // Legacy: role:'system' → type:'announcement' (no role)
+            this.messageHistory.push({
+              type: 'announcement',
+              content,
+              timestamp: this.createdAt,
+            });
+          } else if (m.role === 'user' || m.role === 'assistant') {
+            this.messageHistory.push({
+              role: m.role as 'user' | 'assistant',
+              content,
+              timestamp: this.createdAt,
+              ...(m.type ? { type: m.type as string } : {}),
+              ...(m.turnId ? { turnId: m.turnId as string } : {}),
+            });
+          } else if (m.type) {
+            // New format: no role, has type (e.g. announcements)
+            this.messageHistory.push({
+              type: m.type as string,
+              content,
+              timestamp: this.createdAt,
+            });
           }
         }
       }
@@ -189,6 +205,13 @@ export class HeadlessAgentRunner {
    */
   get busy(): boolean {
     return this._busy;
+  }
+
+  /**
+   * Whether the runner is currently paused due to user intervention.
+   */
+  get isIntervenePaused(): boolean {
+    return this._intervenePaused;
   }
 
   /**
@@ -238,6 +261,43 @@ export class HeadlessAgentRunner {
   }
 
   /**
+   * Pause the runner for user intervention.
+   * Sets a distinct flag so interveneEnd() knows it was an intervention pause.
+   */
+  interveneStart(): void {
+    this._intervenePaused = true;
+    this.pause();
+  }
+
+  /**
+   * End user intervention: clear the flag, emit to browsers, queue notification, and resume.
+   * If the runner was manually paused (not via interveneStart), this is a no-op.
+   */
+  interveneEnd(notification: string): void {
+    if (!this._intervenePaused) return;
+    this._intervenePaused = false;
+
+    this.resume();
+
+    // Emit the intervention message so browsers can render it in the chat panel
+    this.emitEvent({
+      type: 'message',
+      timestamp: Date.now(),
+      data: { role: 'user', content: notification, messageType: 'intervention' },
+    });
+
+    if (!this._busy && this.deps) {
+      this._runLoop(notification, 'intervention').catch(err => {
+        console.error('[HeadlessAgentRunner] Loop error:', err);
+        this._busy = false;
+      });
+    } else {
+      // If busy, queue it for when the current loop ends
+      this._messageQueue.push({ message: notification, type: 'intervention' });
+    }
+  }
+
+  /**
    * Stop the runner gracefully. If a loop is active, waits for current turn to finish.
    */
   stop(): void {
@@ -275,7 +335,7 @@ export class HeadlessAgentRunner {
     }
 
     if (this._busy) {
-      this._messageQueue.push(content);
+      this._messageQueue.push({ message: content });
       this.emitEvent({
         type: 'message',
         timestamp: Date.now(),
@@ -320,7 +380,7 @@ export class HeadlessAgentRunner {
    */
   queueMessage(content: string): void {
     if (this._busy) {
-      this._messageQueue.push(content);
+      this._messageQueue.push({ message: content });
     } else {
       this.sendMessage(content);
     }
@@ -345,7 +405,7 @@ export class HeadlessAgentRunner {
   /**
    * Get message history
    */
-  getMessageHistory(): Array<{ role: 'user' | 'assistant' | 'system'; content: ContentBlock[]; timestamp: number; turnId?: string }> {
+  getMessageHistory(): Array<{ role?: 'user' | 'assistant'; type?: string; content: ContentBlock[]; timestamp: number; turnId?: string }> {
     return [...this.messageHistory];
   }
 
@@ -362,7 +422,7 @@ export class HeadlessAgentRunner {
    */
   addInfoMessage(text: string): void {
     this.messageHistory.push({
-      role: 'system',
+      type: 'announcement',
       content: [{ type: 'text' as const, text }],
       timestamp: Date.now(),
     });
@@ -440,7 +500,8 @@ export class HeadlessAgentRunner {
   serialize(): SerializedSession {
     // Convert message history back to conversation format (include turnId)
     const conversation = this.messageHistory.map(msg => ({
-      role: msg.role,
+      ...(msg.role ? { role: msg.role } : {}),
+      ...(msg.type ? { type: msg.type } : {}),
       content: msg.content,
       ...(msg.turnId ? { turnId: msg.turnId } : {}),
     }));
@@ -522,24 +583,11 @@ export class HeadlessAgentRunner {
    * Run the agentic loop for a new user message.
    * This is async and runs in the background after sendMessage returns.
    */
-  private async _runLoop(userMessage: string): Promise<void> {
+  private async _runLoop(userMessage: string, messageType?: string): Promise<void> {
     if (!this.deps) return;
     this._busy = true;
     this._stopRequested = false;
     this._pauseRequested = false;
-
-    // Preserve system messages (info entries not sent to the LLM).
-    // Record each one's position relative to non-system messages so we can
-    // re-insert them after the loop replaces the history.
-    const systemInserts: Array<{ afterNonSystem: number; msg: { role: 'user' | 'assistant' | 'system'; content: ContentBlock[]; timestamp: number } }> = [];
-    let nonSysCount = 0;
-    for (const msg of this.messageHistory) {
-      if (msg.role === 'system') {
-        systemInserts.push({ afterNonSystem: nonSysCount, msg });
-      } else {
-        nonSysCount++;
-      }
-    }
 
     // Generate turn ID for this turn
     const turnId = `t${this.nextTurnId++}`;
@@ -616,12 +664,14 @@ export class HeadlessAgentRunner {
 
       // Append new messages from the loop (those beyond existingCount)
       const newMessages = finalMessages.slice(existingCount);
-      for (const msg of newMessages) {
+      for (let i = 0; i < newMessages.length; i++) {
+        const msg = newMessages[i];
         newHistory.push({
           role: msg.role,
           content: msg.content,
           timestamp,
           turnId,
+          ...(i === 0 && messageType ? { type: messageType } : {}),
         });
       }
 
@@ -655,8 +705,8 @@ export class HeadlessAgentRunner {
         this._messageQueue = [];
         this.setState('paused');
       } else if (this._messageQueue.length > 0) {
-        const nextMessage = this._messageQueue.shift()!;
-        this._runLoop(nextMessage).catch(err => {
+        const next = this._messageQueue.shift()!;
+        this._runLoop(next.message, next.type).catch(err => {
           console.error('[HeadlessAgentRunner] Loop error:', err);
           this.emitEvent({ type: 'error', timestamp: Date.now(), data: { error: String(err) } });
           this._busy = false;
@@ -674,8 +724,11 @@ export class HeadlessAgentRunner {
    * In 'full' mode: all messages (current behavior).
    */
   private buildContextForLoop(contextMode: 'slim' | 'full', fullContextTurns: number): Message[] {
+    // Filter announcements (no role) but pass all other fields through —
+    // buildContextMessages needs turnId for turn selection, and toApiMessage
+    // strips everything except API fields at the end.
     const nonSystemMessages = this.messageHistory
-      .filter(msg => msg.role !== 'system')
+      .filter(msg => msg.role != null)
       .map(msg => ({
         role: msg.role as 'user' | 'assistant',
         content: msg.content,
@@ -687,19 +740,24 @@ export class HeadlessAgentRunner {
     const hasTurnIds = nonSystemMessages.some(m => m.turnId);
     const effectiveMode = (!hasTurnIds && this.terseLog.length === 0) ? 'full' : contextMode;
 
-    const contextMessages = buildContextMessages(
+    const rawContextMessages = buildContextMessages(
       this.terseLog,
       nonSystemMessages as Array<Record<string, unknown>>,
       { contextMode: effectiveMode, maxTerseEntries: 50, fullContextTurns },
     );
+    // Compress stale browse accessibility trees — only the latest tree is actionable
+    const contextMessages = compressBrowseResults(rawContextMessages as Array<Record<string, unknown>>);
 
-    // Convert back to Message format
-    return contextMessages.map(m => ({
-      role: (m.role as 'user' | 'assistant'),
-      content: Array.isArray(m.content)
-        ? m.content as ContentBlock[]
-        : [{ type: 'text' as const, text: String(m.content) }],
-    }));
+    // Allowlist: only API fields pass through. Same allowlist used by browser api-handler.
+    return contextMessages.map(m => {
+      const clean = toApiMessage(m);
+      return {
+        role: clean.role as 'user' | 'assistant',
+        content: Array.isArray(clean.content)
+          ? clean.content as ContentBlock[]
+          : [{ type: 'text' as const, text: String(clean.content) }],
+      };
+    });
   }
 
   /**
@@ -720,7 +778,8 @@ export class HeadlessAgentRunner {
         try {
           await mkdir(this.deps.filesRoot, { recursive: true });
           const messages = this.messageHistory.map(m => ({
-            role: m.role,
+            ...(m.role ? { role: m.role } : {}),
+            ...(m.type ? { type: m.type } : {}),
             content: m.content,
             ...(m.turnId ? { turnId: m.turnId } : {}),
           }));

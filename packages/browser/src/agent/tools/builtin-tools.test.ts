@@ -57,7 +57,7 @@ describe('getBuiltinToolDefinitions', () => {
     const tool = tools.find(t => t.name === 'view_state');
     expect(tool).toBeDefined();
     expect(tool!.input_schema.properties!.state).toBeDefined();
-    expect(tool!.input_schema.properties!.state.enum).toEqual(['max', 'ui-only', 'chat-only']);
+    expect(tool!.input_schema.properties!.state.enum).toEqual(['max', 'ui-only', 'chat-only', 'web-max', 'web-only']);
     expect(tool!.input_schema.required).toEqual(['state']);
   });
 

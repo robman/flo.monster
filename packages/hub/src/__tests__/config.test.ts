@@ -9,10 +9,12 @@ import { tmpdir } from 'node:os';
 import {
   loadConfig,
   saveConfig,
+  getConfigPath,
   getDefaultConfig,
   validateConfig,
   DEFAULT_RESTRICTED_BLOCKLIST,
   type HubConfig,
+  type BrowseToolConfig,
 } from '../config.js';
 
 describe('config', () => {
@@ -25,6 +27,19 @@ describe('config', () => {
 
   afterEach(async () => {
     await rm(testDir, { recursive: true, force: true });
+  });
+
+  describe('getConfigPath', () => {
+    it('should use HOME env var for config path', () => {
+      const originalHome = process.env.HOME;
+      try {
+        process.env.HOME = '/home/flo-test-user';
+        const configPath = getConfigPath();
+        expect(configPath).toBe('/home/flo-test-user/.flo-monster/hub.json');
+      } finally {
+        process.env.HOME = originalHome;
+      }
+    });
   });
 
   describe('getDefaultConfig', () => {
@@ -51,6 +66,16 @@ describe('config', () => {
 
       expect(config.tools.filesystem.blockedPaths).toBeDefined();
       expect(config.tools.filesystem.blockedPaths!.length).toBeGreaterThan(0);
+    });
+
+    it('should have browse enabled by default', () => {
+      const config = getDefaultConfig();
+      expect(config.tools.browse).toBeDefined();
+      expect(config.tools.browse!.enabled).toBe(true);
+      expect(config.tools.browse!.maxConcurrentSessions).toBe(3);
+      expect(config.tools.browse!.sessionTimeoutMinutes).toBe(30);
+      expect(config.tools.browse!.blockPrivateIPs).toBe(true);
+      expect(config.tools.browse!.viewport).toEqual({ width: 1419, height: 813 });
     });
   });
 
@@ -241,6 +266,72 @@ describe('config', () => {
       config.tools.bash.runAsUser = 'has spaces';
       expect(validateConfig(config)).toBe(false);
     });
+
+    it('should accept config without browse section (backward compat)', () => {
+      const config = getDefaultConfig();
+      delete (config.tools as any).browse;
+      expect(validateConfig(config)).toBe(true);
+    });
+
+    it('should accept valid browse config', () => {
+      const config = getDefaultConfig();
+      config.tools.browse = {
+        enabled: true,
+        maxConcurrentSessions: 5,
+        sessionTimeoutMinutes: 60,
+        allowedDomains: ['*.example.com'],
+        blockedDomains: ['*.evil.com'],
+        blockPrivateIPs: true,
+        rateLimitPerDomain: 20,
+        viewport: { width: 1920, height: 1080 },
+      };
+      expect(validateConfig(config)).toBe(true);
+    });
+
+    it('should reject browse with invalid maxConcurrentSessions', () => {
+      const config = getDefaultConfig();
+      config.tools.browse = { ...config.tools.browse!, maxConcurrentSessions: 0 };
+      expect(validateConfig(config)).toBe(false);
+    });
+
+    it('should reject browse with invalid sessionTimeoutMinutes', () => {
+      const config = getDefaultConfig();
+      config.tools.browse = { ...config.tools.browse!, sessionTimeoutMinutes: -1 };
+      expect(validateConfig(config)).toBe(false);
+    });
+
+    it('should reject browse with invalid viewport', () => {
+      const config = getDefaultConfig();
+      config.tools.browse = { ...config.tools.browse!, viewport: { width: 0, height: 720 } };
+      expect(validateConfig(config)).toBe(false);
+    });
+
+    it('should reject browse with negative rateLimitPerDomain', () => {
+      const config = getDefaultConfig();
+      config.tools.browse = { ...config.tools.browse!, rateLimitPerDomain: -1 };
+      expect(validateConfig(config)).toBe(false);
+    });
+
+    it('should accept browse with rateLimitPerDomain of 0 (unlimited)', () => {
+      const config = getDefaultConfig();
+      config.tools.browse = { ...config.tools.browse!, rateLimitPerDomain: 0 };
+      expect(validateConfig(config)).toBe(true);
+    });
+
+    it('should validate allowedOrigins as array of strings', () => {
+      const config = getDefaultConfig();
+
+      // Valid
+      expect(validateConfig({ ...config, allowedOrigins: ['https://flo.monster'] })).toBe(true);
+      expect(validateConfig({ ...config, allowedOrigins: [] })).toBe(true);
+      expect(validateConfig({ ...config, allowedOrigins: ['https://flo.monster', 'https://app.flo.monster'] })).toBe(true);
+
+      // Invalid
+      expect(validateConfig({ ...config, allowedOrigins: 'not-array' })).toBe(false);
+      expect(validateConfig({ ...config, allowedOrigins: [123] })).toBe(false);
+      expect(validateConfig({ ...config, allowedOrigins: [''] })).toBe(false);
+      expect(validateConfig({ ...config, allowedOrigins: ['https://flo.monster', ''] })).toBe(false);
+    });
   });
 
   describe('loadConfig', () => {
@@ -301,6 +392,44 @@ describe('config', () => {
       const config = await loadConfig(configPath);
 
       expect(config).toEqual(getDefaultConfig());
+    });
+
+    it('should merge browse config from loaded file', async () => {
+      const configPath = join(testDir, 'hub.json');
+      const configWithBrowse = {
+        ...getDefaultConfig(),
+        tools: {
+          ...getDefaultConfig().tools,
+          browse: {
+            enabled: true,
+            maxConcurrentSessions: 10,
+            sessionTimeoutMinutes: 60,
+            allowedDomains: ['*.test.com'],
+            blockedDomains: [],
+            blockPrivateIPs: true,
+            rateLimitPerDomain: 5,
+            viewport: { width: 1920, height: 1080 },
+          },
+        },
+      };
+      await writeFile(configPath, JSON.stringify(configWithBrowse), 'utf-8');
+      const loaded = await loadConfig(configPath);
+      expect(loaded.tools.browse?.enabled).toBe(true);
+      expect(loaded.tools.browse?.maxConcurrentSessions).toBe(10);
+      expect(loaded.tools.browse?.viewport).toEqual({ width: 1920, height: 1080 });
+    });
+
+    it('should use default browse config when not in loaded file', async () => {
+      const configPath = join(testDir, 'hub.json');
+      // Config without browse section
+      const configNoBrowse = {
+        ...getDefaultConfig(),
+      };
+      delete (configNoBrowse.tools as any).browse;
+      await writeFile(configPath, JSON.stringify(configNoBrowse), 'utf-8');
+      const loaded = await loadConfig(configPath);
+      expect(loaded.tools.browse).toBeDefined();
+      expect(loaded.tools.browse!.enabled).toBe(true);
     });
   });
 

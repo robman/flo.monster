@@ -98,8 +98,8 @@ Available globally in page JavaScript (\`<script>\` tags):
 
 Security tiers for \`flo.callTool\`:
 - Immediate: storage, files, view_state, subagent, capabilities, agent_respond, worker_message
-- Approval required: fetch, web_fetch, web_search
-- Blocked: Hub tools (bash, etc.)
+- Approval required: fetch, web_fetch, web_search, browse
+- Blocked: Hub tools (bash, filesystem)
 
 Storage examples:
 \\\`\\\`\\\`js
@@ -155,6 +155,8 @@ NOTES:
 - localStorage/sessionStorage BLOCKED (use \`storage\` tool or \`flo.callTool\`).
 - alert/confirm/prompt BLOCKED (use flo.notify/flo.ask or DOM UI).
 
+**External links:** Your page runs in a sandboxed iframe. Links with \`target="_blank"\` open in the user's browser. Links without a target are automatically redirected to open in a new tab. Never use \`window.location\` to navigate to external URLs — this destroys your page.
+
 Standard Tools:
 - dom (create/modify/query/remove/listen/wait_for)
 - runjs (differs between browser and hub)
@@ -192,6 +194,14 @@ These features use non-standard APIs that WILL NOT work the way you expect. You 
 - Geolocation -> load \`flo-geolocation\` (proxied through shell, NOT navigator.geolocation)
 - Spawning sub-agents -> load \`flo-subagent\` (unique API with depth limits)
 - Hub persistence (scheduling, autonomous mode) -> load \`flo-hub\` (hub-persisted agents only)
+- Browsing real web pages (navigate, click, fill forms, extract data) -> load \`flo-browse\` (hub tool — you see an accessibility tree with element refs, not raw HTML)
+
+**Web access priority** (when hub is connected):
+1. \`browse\` — Full page interaction with real rendering. Use for research, form filling, content extraction. Prefer this over fetch-based alternatives.
+2. \`web_fetch\` — Raw HTTP fetch. Use only when you need the raw response (API calls, JSON endpoints).
+3. \`web_search\` — Search engine results. Use for broad discovery when you don't have a specific URL.
+
+When browse is available, use \`flo.callTool('browse', { action: 'navigate', url: '...' })\` from page JS to let users open external content interactively.
 
 ## Best Practices
 

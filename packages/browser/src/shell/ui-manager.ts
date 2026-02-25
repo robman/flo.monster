@@ -22,7 +22,7 @@ import type { SkillManager } from './skill-manager.js';
 import type { TemplateManager } from './template-manager.js';
 import type { HubClient } from './hub-client.js';
 import type { KeyStore } from './key-store.js';
-import type { CostTracker, ToolPluginRegistry } from '@flo-monster/core';
+import type { AgentViewState, CostTracker, ToolPluginRegistry } from '@flo-monster/core';
 import type { HubAgentProxy } from './hub-agent-proxy.js';
 import type { HubAgentCardCallbacks } from '../ui/hub-agent-card.js';
 
@@ -69,6 +69,9 @@ export class UIManager {
   private agentView: AgentView | null = null;
   private currentMode: 'homepage' | 'dashboard' | 'focused' = 'dashboard';
   private activeAgentEventUnsub: (() => void) | null = null;
+  private browseStreamUnsubs: (() => void)[] = [];
+  private browseStreamInfo: { connectionId: string; agentId: string } | null = null;
+  private browseStreamRetryTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Outer skin system
   private outerSkin: LoadedOuterSkin | null = null;
@@ -204,6 +207,7 @@ export class UIManager {
       this.agentView.unmount();
       this.agentView = null;
     }
+    this.cleanupBrowseStreamListeners();
     mainContent.innerHTML = '';
     this.currentMode = 'dashboard';
 
@@ -397,12 +401,36 @@ export class UIManager {
       },
       onSaveAsTemplate: (id) => this.handleSaveAsTemplate(id, mainContent, statusState),
       onPersist: (id) => this.handlePersistToHub(id),
+      onViewStateChange: (id, state) => this.handleViewStateChange(id, state),
+      onIntervene: (_agentId, mode) => {
+        if (this.browseStreamInfo) {
+          this.deps.hubClient.requestIntervene(this.browseStreamInfo.connectionId, this.browseStreamInfo.agentId, mode);
+        }
+      },
+      onReleaseIntervene: (_agentId) => {
+        if (this.browseStreamInfo) {
+          this.deps.hubClient.releaseIntervene(this.browseStreamInfo.connectionId, this.browseStreamInfo.agentId);
+        }
+      },
     });
+
+    // Set up browse stream listeners if hub has browse tool (but don't show
+    // web-* view state buttons yet — only show them when the agent actually
+    // has an active browse session, detected via tool_use_start events)
+    const browseHubId = this.deps.hubClient.findToolHub('browse');
+    if (browseHubId) {
+      this.setupBrowseStreamListeners(browseHubId);
+    }
+
     this.agentView.setOnBack(() => this.showDashboard(mainContent, statusState));
     this.agentView.setAgentName(agent.config.name);
 
     // Sync AgentView's view state with the agent's persisted view state
     const agentViewState = agent.getViewState();
+    // If persisted state is web-*, the agent had a browse session — enable buttons
+    if ((agentViewState === 'web-max' || agentViewState === 'web-only') && browseHubId) {
+      this.agentView.setHasBrowseSession(true);
+    }
     if (agentViewState !== this.agentView.getViewState()) {
       this.agentView.setViewState(agentViewState);
     }
@@ -476,6 +504,9 @@ export class UIManager {
       agent.showInPane(this.agentView.getIframePane());
       this.agentView.mount(agent);
 
+      // If view state was restored to a web state before mount, request the stream now
+      this.ensureStreamIfWebState(agentId, agent);
+
       // Apply pending hub DOM state for hub-persisted agents
       if (agent.hubPersistInfo && agent.pendingHubDomState) {
         const domState = agent.pendingHubDomState;
@@ -508,10 +539,22 @@ export class UIManager {
       this.activeAgentEventUnsub();
       this.activeAgentEventUnsub = null;
     }
-    // Subscribe to new agent events for status bar updates
+    // Subscribe to new agent events for status bar updates + browse detection
     this.activeAgentEventUnsub = agent.onEvent((event) => {
       if (event.type === 'state_change') {
         this.updateStatusBar(statusState);
+      }
+      // Detect when agent starts using browse tool → show web-* view state buttons
+      if (event.type === 'tool_use_start' && event.toolName === 'browse' && this.agentView && !this.agentView.getHasBrowseSession()) {
+        this.agentView.setHasBrowseSession(true);
+      }
+      // Scan conversation history for browse tool_use (restored hub agents)
+      const ev = event as any;
+      if (ev.type === 'conversation_history' && this.agentView && !this.agentView.getHasBrowseSession()) {
+        const messages = ev.messages as Array<{ content?: Array<{ type: string; name?: string }> }> | undefined;
+        if (messages?.some((m: any) => m.content?.some((b: any) => b.type === 'tool_use' && b.name === 'browse'))) {
+          this.agentView.setHasBrowseSession(true);
+        }
       }
     });
 
@@ -681,6 +724,183 @@ export class UIManager {
     }
   }
 
+  /**
+   * Handle view state changes — start/stop browse streams for web-max/web-only.
+   */
+  private handleViewStateChange(agentId: string, state: AgentViewState): void {
+    const isWebState = state === 'web-max' || state === 'web-only';
+
+    if (isWebState) {
+      // Already streaming — just keep it going (e.g. web-max ↔ web-only transition)
+      if (this.browseStreamInfo) return;
+
+      this.requestBrowseStream(agentId);
+    } else {
+      // Leaving web state — stop stream and retry timer
+      this.clearBrowseStreamRetry();
+      if (this.agentView) {
+        this.agentView.stopStream();
+      }
+      if (this.browseStreamInfo) {
+        this.deps.hubClient.stopBrowseStream(
+          this.browseStreamInfo.connectionId,
+          this.browseStreamInfo.agentId,
+        );
+        this.browseStreamInfo = null;
+      }
+    }
+  }
+
+  /**
+   * If the agent view is in a web state (web-max/web-only) and no stream is
+   * running, request one. Called after mount when view state was restored
+   * before the agent was available.
+   */
+  private ensureStreamIfWebState(agentId: string, agent: AgentContainer): void {
+    if (!this.agentView) return;
+    const viewState = this.agentView.getViewState();
+    if ((viewState === 'web-max' || viewState === 'web-only') && !this.browseStreamInfo) {
+      const hubAgentId = agent.hubPersistInfo?.hubAgentId || agentId;
+      this.requestBrowseStream(hubAgentId);
+    }
+  }
+
+  private requestBrowseStream(agentId: string): void {
+    const browseHubId = this.deps.hubClient.findToolHub('browse');
+    if (!browseHubId) return;
+
+    const agent = this.deps.agentManager.getAgent(agentId);
+    const hubAgentId = agent?.hubPersistInfo?.hubAgentId || agentId;
+
+    this.browseStreamInfo = { connectionId: browseHubId, agentId: hubAgentId };
+    this.deps.hubClient.requestBrowseStream(browseHubId, hubAgentId);
+  }
+
+  /** Clear hasBrowseSession flag and fall back from web-* view states. */
+  private clearBrowseSession(): void {
+    if (!this.agentView) return;
+    this.clearBrowseStreamRetry();
+    this.agentView.setHasBrowseSession(false);
+    const state = this.agentView.getViewState();
+    if (state === 'web-max') {
+      this.agentView.setViewState('max');
+    } else if (state === 'web-only') {
+      this.agentView.setViewState('chat-only');
+    }
+  }
+
+  private clearBrowseStreamRetry(): void {
+    if (this.browseStreamRetryTimer) {
+      clearTimeout(this.browseStreamRetryTimer);
+      this.browseStreamRetryTimer = null;
+    }
+  }
+
+  private retryBrowseStream(failedAgentId: string): void {
+    if (!this.agentView) return;
+    const currentState = this.agentView.getViewState();
+    if (currentState !== 'web-max' && currentState !== 'web-only') return;
+
+    this.clearBrowseStreamRetry();
+    this.browseStreamRetryTimer = setTimeout(() => {
+      this.browseStreamRetryTimer = null;
+      if (!this.browseStreamInfo && this.agentView) {
+        const state = this.agentView.getViewState();
+        if (state === 'web-max' || state === 'web-only') {
+          this.requestBrowseStream(failedAgentId);
+        }
+      }
+    }, 3000);
+  }
+
+  /**
+   * Set up listeners for browse stream token/stopped/error events.
+   */
+  private setupBrowseStreamListeners(browseHubId: string): void {
+    this.cleanupBrowseStreamListeners();
+
+    const unsub1 = this.deps.hubClient.onBrowseStreamToken((_agentId, data) => {
+      if (!this.agentView) return;
+
+      // Use streamUrl from hub if provided (path-based routing behind nginx),
+      // otherwise construct from hub WS URL + stream port (direct connection)
+      let streamUrl: string;
+      if (data.streamUrl) {
+        streamUrl = data.streamUrl;
+      } else {
+        const conn = this.deps.hubClient.getConnection(browseHubId);
+        if (!conn) return;
+        const hubUrl = new URL(conn.url);
+        hubUrl.port = String(data.streamPort);
+        streamUrl = hubUrl.toString();
+      }
+
+      try {
+        const agentId = this.browseStreamInfo?.agentId;
+        this.agentView.startStream(streamUrl, data.token, data.viewport, agentId ? () => {
+          // Stream closed (e.g. browse session crash/restart) — retry
+          this.browseStreamInfo = null;
+          this.retryBrowseStream(agentId);
+        } : undefined);
+      } catch (err) {
+        console.warn('[ui-manager] Failed to construct stream URL:', err);
+      }
+    });
+
+    const unsub2 = this.deps.hubClient.onBrowseStreamStopped(() => {
+      if (this.agentView) {
+        this.agentView.stopStream();
+        this.clearBrowseSession();
+      }
+    });
+
+    const unsub3 = this.deps.hubClient.onBrowseStreamError((_agentId, error) => {
+      console.warn('[ui-manager] Browse stream error:', error);
+      if (this.agentView) {
+        this.agentView.stopStream();
+      }
+      this.browseStreamInfo = null;
+      this.clearBrowseSession();
+    });
+
+    const unsub4 = this.deps.hubClient.onInterveneGranted((agentId, mode) => {
+      if (this.agentView && this.browseStreamInfo?.agentId === agentId) {
+        this.agentView.setInterveneMode(mode);
+      }
+    });
+
+    const unsub5 = this.deps.hubClient.onInterveneDenied((agentId, reason) => {
+      console.warn(`[ui-manager] Intervention denied for ${agentId}: ${reason}`);
+    });
+
+    const unsub6 = this.deps.hubClient.onInterveneEnded((agentId, reason, notification) => {
+      if (this.agentView && this.browseStreamInfo?.agentId === agentId) {
+        this.agentView.setInterveneMode('none');
+        if (notification) {
+          // Show intervention block in chat
+          this.agentView.showInterventionBlock(notification);
+          // For browser-routed agents (no hub runner), also send to worker so LLM processes it.
+          // Hub-persisted agents get the notification via runner.interveneEnd() instead.
+          const agent = this.deps.agentManager.getAgent(agentId);
+          if (agent && !agent.hubPersistInfo) {
+            agent.sendUserMessage(notification, undefined, { messageType: 'intervention' });
+          }
+        }
+      }
+    });
+
+    this.browseStreamUnsubs = [unsub1, unsub2, unsub3, unsub4, unsub5, unsub6];
+  }
+
+  private cleanupBrowseStreamListeners(): void {
+    this.clearBrowseStreamRetry();
+    for (const unsub of this.browseStreamUnsubs) {
+      unsub();
+    }
+    this.browseStreamUnsubs = [];
+    this.browseStreamInfo = null;
+  }
+
   private handlePersistToHub(agentId: string): void {
     const agent = this.deps.agentManager.getAgent(agentId);
     if (!agent) return;
@@ -765,6 +985,7 @@ export class UIManager {
       this.agentView.unmount();
       this.agentView = null;
     }
+    this.cleanupBrowseStreamListeners();
     if (this.dashboard) {
       this.dashboard.unmount();
       this.dashboard = null;

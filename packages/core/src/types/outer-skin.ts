@@ -21,6 +21,9 @@ export interface OuterSkinManifest {
   /** Optional relative URL to JavaScript file */
   scriptUrl?: string;
 
+  /** Background color for the page body when this skin is displayed (e.g. "#ffffff", "#1a1a2e") */
+  backgroundColor?: string;
+
   /** Homepage configuration */
   homepage: {
     /** Section IDs in display order */

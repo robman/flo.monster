@@ -2,14 +2,14 @@
  * Tests for admin WebSocket server
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { WebSocket } from 'ws';
-import { mkdir, rm } from 'node:fs/promises';
+import { mkdir, rm, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHubServer, type HubServer } from '../../server.js';
 import { createAdminServer, type AdminServer } from '../server.js';
-import { getDefaultConfig, type HubConfig } from '../../config.js';
+import { getDefaultConfig, getConfigPath, type HubConfig } from '../../config.js';
 import type { HubToAdmin, AdminToHub } from '@flo-monster/core';
 
 describe('admin server', () => {
@@ -94,6 +94,53 @@ describe('admin server', () => {
       check();
     });
   }
+
+  describe('binding', () => {
+    it('should always bind to 127.0.0.1 regardless of config.host', () => {
+      const addr = adminServer.wss.address();
+      expect(addr).not.toBeNull();
+      expect(typeof addr).toBe('object');
+      if (typeof addr === 'object' && addr !== null) {
+        expect(addr.address).toBe('127.0.0.1');
+      }
+    });
+  });
+
+  describe('path routing', () => {
+    it('should accept connections on /admin path', async () => {
+      const ws = new WebSocket(`ws://127.0.0.1:${ADMIN_PORT}/admin`);
+      const messages: HubToAdmin[] = [];
+
+      ws.on('message', (data) => {
+        messages.push(JSON.parse(data.toString()) as HubToAdmin);
+      });
+
+      await new Promise<void>((resolve, reject) => {
+        ws.once('open', () => resolve());
+        ws.once('error', reject);
+      });
+
+      // Verify auth works over /admin path
+      ws.send(JSON.stringify({ type: 'admin_auth', token: 'test-admin-token' }));
+
+      const response = await waitForMessage<{ type: 'auth_result'; success: boolean }>(messages, 'auth_result');
+      expect(response.success).toBe(true);
+
+      ws.close();
+    });
+
+    it('should accept connections without path', async () => {
+      const { ws, messages } = await createAdminClient();
+
+      // Verify auth works without path (backward compat)
+      ws.send(JSON.stringify({ type: 'admin_auth', token: 'test-admin-token' }));
+
+      const response = await waitForMessage<{ type: 'auth_result'; success: boolean }>(messages, 'auth_result');
+      expect(response.success).toBe(true);
+
+      ws.close();
+    });
+  });
 
   describe('authentication', () => {
     it('should require authentication with adminToken configured', async () => {
@@ -445,6 +492,161 @@ describe('admin server', () => {
 
       const response = await waitForMessage<{ type: 'error'; message: string }>(messages, 'error');
       expect(response.message).toContain('Unknown');
+
+      ws.close();
+    });
+  });
+
+  describe('update_config', () => {
+    async function authenticatedClient(): Promise<{ ws: WebSocket; messages: HubToAdmin[] }> {
+      const { ws, messages } = await createAdminClient();
+      ws.send(JSON.stringify({ type: 'admin_auth', token: 'test-admin-token' }));
+      await waitForMessage(messages, 'auth_result');
+      return { ws, messages };
+    }
+
+    it('should update allowed fields', async () => {
+      const { ws, messages } = await authenticatedClient();
+
+      ws.send(JSON.stringify({
+        type: 'update_config',
+        fields: { 'tools.browse.maxConcurrentSessions': 5 },
+      }));
+
+      const response = await waitForMessage<{ type: 'config_updated'; success: boolean }>(messages, 'config_updated');
+      expect(response.success).toBe(true);
+
+      // Verify in-memory config was updated
+      expect(config.tools.browse?.maxConcurrentSessions).toBe(5);
+
+      ws.close();
+    });
+
+    it('should reject disallowed fields', async () => {
+      const { ws, messages } = await authenticatedClient();
+
+      ws.send(JSON.stringify({
+        type: 'update_config',
+        fields: { port: 9999 },
+      }));
+
+      const response = await waitForMessage<{ type: 'config_updated'; success: boolean; error?: string }>(messages, 'config_updated');
+      expect(response.success).toBe(false);
+      expect(response.error).toContain('Disallowed');
+      expect(response.error).toContain('port');
+
+      // Verify config was NOT changed
+      expect(config.port).toBe(HUB_PORT);
+
+      ws.close();
+    });
+
+    it('should atomically reject mixed allowed + disallowed fields', async () => {
+      const originalMaxSessions = config.tools.browse?.maxConcurrentSessions;
+      const { ws, messages } = await authenticatedClient();
+
+      ws.send(JSON.stringify({
+        type: 'update_config',
+        fields: {
+          'tools.browse.maxConcurrentSessions': 10,
+          'port': 9999,
+        },
+      }));
+
+      const response = await waitForMessage<{ type: 'config_updated'; success: boolean; error?: string }>(messages, 'config_updated');
+      expect(response.success).toBe(false);
+      expect(response.error).toContain('Disallowed');
+
+      // Verify the allowed field was NOT changed either (atomic rejection)
+      expect(config.tools.browse?.maxConcurrentSessions).toBe(originalMaxSessions);
+
+      ws.close();
+    });
+
+    it('should reject invalid values that fail validation', async () => {
+      const { ws, messages } = await authenticatedClient();
+
+      // maxConcurrentSessions must be >= 1 per validateConfig
+      ws.send(JSON.stringify({
+        type: 'update_config',
+        fields: { 'tools.browse.maxConcurrentSessions': -1 },
+      }));
+
+      const response = await waitForMessage<{ type: 'config_updated'; success: boolean; error?: string }>(messages, 'config_updated');
+      expect(response.success).toBe(false);
+      expect(response.error).toContain('Validation failed');
+
+      ws.close();
+    });
+
+    it('should persist config to disk after update', async () => {
+      const { ws, messages } = await authenticatedClient();
+
+      ws.send(JSON.stringify({
+        type: 'update_config',
+        fields: { 'tools.browse.maxConcurrentSessions': 7 },
+      }));
+
+      const response = await waitForMessage<{ type: 'config_updated'; success: boolean }>(messages, 'config_updated');
+      expect(response.success).toBe(true);
+
+      // Read the config file from disk and verify
+      const configPath = getConfigPath();
+      const content = await readFile(configPath, 'utf-8');
+      const savedConfig = JSON.parse(content);
+      expect(savedConfig.tools.browse.maxConcurrentSessions).toBe(7);
+
+      ws.close();
+    });
+
+    it('should reject update_config when not authenticated', async () => {
+      const { ws, messages } = await createAdminClient();
+
+      ws.send(JSON.stringify({
+        type: 'update_config',
+        fields: { 'tools.browse.maxConcurrentSessions': 5 },
+      }));
+
+      const response = await waitForMessage<{ type: 'error'; message: string }>(messages, 'error');
+      expect(response.message).toContain('Not authenticated');
+
+      ws.close();
+    });
+  });
+
+  describe('restart_hub', () => {
+    async function authenticatedClient(): Promise<{ ws: WebSocket; messages: HubToAdmin[] }> {
+      const { ws, messages } = await createAdminClient();
+      ws.send(JSON.stringify({ type: 'admin_auth', token: 'test-admin-token' }));
+      await waitForMessage(messages, 'auth_result');
+      return { ws, messages };
+    }
+
+    it('should send OK response and trigger process.exit', async () => {
+      const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {}) as never);
+
+      const { ws, messages } = await authenticatedClient();
+
+      ws.send(JSON.stringify({ type: 'restart_hub' }));
+
+      const response = await waitForMessage<{ type: 'ok'; message?: string }>(messages, 'ok');
+      expect(response.message).toContain('restarting');
+
+      // Wait for the setTimeout to fire
+      await new Promise(resolve => setTimeout(resolve, 200));
+      expect(exitSpy).toHaveBeenCalledWith(1);
+
+      exitSpy.mockRestore();
+      ws.close();
+    });
+
+    it('should reject restart_hub when not authenticated', async () => {
+      const { ws, messages } = await createAdminClient();
+
+      ws.send(JSON.stringify({ type: 'restart_hub' }));
+
+      const response = await waitForMessage<{ type: 'error'; message: string }>(messages, 'error');
+      expect(response.message).toContain('Not authenticated');
 
       ws.close();
     });

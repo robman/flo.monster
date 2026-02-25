@@ -36,6 +36,7 @@ describe('API Proxy Handler', () => {
 
     sentMessages = [];
     mockClient = {
+      id: 'test-client-id',
       ws: {
         send: (data: string) => sentMessages.push(JSON.parse(data)),
         readyState: 1, // OPEN

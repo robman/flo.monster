@@ -684,7 +684,7 @@ export class MessageRelay {
 
       if (hubId) {
         try {
-          const result = await this.hubClient.executeTool(hubId, msg.name, msg.input);
+          const result = await this.hubClient.executeTool(hubId, msg.name, msg.input, agent.id);
           target.postMessage({
             type: 'tool_execute_result',
             id: msg.id,

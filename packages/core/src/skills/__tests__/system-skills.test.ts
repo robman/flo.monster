@@ -4,7 +4,7 @@ import { getSystemSkills } from '../system-skills.js';
 describe('getSystemSkills', () => {
   const skills = getSystemSkills();
 
-  it('returns all 6 expected skills', () => {
+  it('returns all 7 expected skills', () => {
     const names = skills.map(s => s.name);
     expect(names).toContain('flo-srcdoc');
     expect(names).toContain('flo-subagent');
@@ -12,7 +12,8 @@ describe('getSystemSkills', () => {
     expect(names).toContain('flo-media');
     expect(names).toContain('flo-geolocation');
     expect(names).toContain('flo-hub');
-    expect(skills).toHaveLength(6);
+    expect(names).toContain('flo-browse');
+    expect(skills).toHaveLength(7);
   });
 
   it('all have category system', () => {
@@ -45,9 +46,16 @@ describe('getSystemSkills', () => {
     expect(hubSkill!.manifest.requiredCapabilities).toEqual(['hub']);
   });
 
+  it('flo-browse does NOT have requiredCapabilities (works in browser-with-hub too)', () => {
+    const browseSkill = skills.find(s => s.name === 'flo-browse');
+    expect(browseSkill).toBeDefined();
+    expect(browseSkill!.manifest.requiredCapabilities).toBeUndefined();
+  });
+
   it('non-hub skills do NOT have requiredCapabilities', () => {
-    const nonHubSkills = skills.filter(s => s.name !== 'flo-hub');
-    expect(nonHubSkills).toHaveLength(5);
+    const hubSkillNames = new Set(['flo-hub']);
+    const nonHubSkills = skills.filter(s => !hubSkillNames.has(s.name));
+    expect(nonHubSkills).toHaveLength(6);
     for (const skill of nonHubSkills) {
       expect(skill.manifest.requiredCapabilities).toBeUndefined();
     }

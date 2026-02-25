@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { handleSrcdocToolCall } from './srcdoc-handler.js';
+import { handleSrcdocToolCall, executeSrcdocBuiltinTool } from './srcdoc-handler.js';
 import type { AgentContainer } from '../../agent/agent-container.js';
 import type { SrcdocContext } from './srcdoc-handler.js';
 
@@ -184,5 +184,59 @@ describe('handleSrcdocToolCall', () => {
       },
       '*',
     );
+  });
+});
+
+describe('executeSrcdocBuiltinTool browse routing', () => {
+  it('routes browse through hub client', async () => {
+    const agent = createMockAgent();
+    const executeTool = vi.fn().mockResolvedValue({
+      result: 'URL: https://example.com\n\n- heading "Test"',
+      is_error: false,
+    });
+    const findToolHub = vi.fn().mockReturnValue('hub-1');
+    const ctx = createMockContext({
+      hubClient: { findToolHub, executeTool } as any,
+    });
+
+    const result = await executeSrcdocBuiltinTool('browse', { action: 'load', url: 'https://example.com' }, agent, ctx);
+
+    expect(findToolHub).toHaveBeenCalledWith('browse');
+    expect(executeTool).toHaveBeenCalledWith('hub-1', 'browse', { action: 'load', url: 'https://example.com' }, 'agent-1');
+    expect(result).toBe('URL: https://example.com\n\n- heading "Test"');
+  });
+
+  it('throws when no hub client', async () => {
+    const agent = createMockAgent();
+    const ctx = createMockContext({ hubClient: null });
+
+    await expect(
+      executeSrcdocBuiltinTool('browse', { action: 'load', url: 'https://example.com' }, agent, ctx)
+    ).rejects.toThrow('hub connection');
+  });
+
+  it('throws when hub lacks browse tool', async () => {
+    const agent = createMockAgent();
+    const ctx = createMockContext({
+      hubClient: { findToolHub: vi.fn().mockReturnValue(undefined) } as any,
+    });
+
+    await expect(
+      executeSrcdocBuiltinTool('browse', { action: 'load', url: 'https://example.com' }, agent, ctx)
+    ).rejects.toThrow('not available');
+  });
+
+  it('throws when hub returns error', async () => {
+    const agent = createMockAgent();
+    const ctx = createMockContext({
+      hubClient: {
+        findToolHub: vi.fn().mockReturnValue('hub-1'),
+        executeTool: vi.fn().mockResolvedValue({ result: 'Session not found', is_error: true }),
+      } as any,
+    });
+
+    await expect(
+      executeSrcdocBuiltinTool('browse', { action: 'load', url: 'https://example.com' }, agent, ctx)
+    ).rejects.toThrow('Session not found');
   });
 });

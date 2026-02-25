@@ -25,9 +25,19 @@ describe('AgentViewState type', () => {
       expect(state).toBe('chat-only');
     });
 
-    it('should have exactly 4 valid values', () => {
-      const validStates: AgentViewState[] = ['min', 'max', 'ui-only', 'chat-only'];
-      expect(validStates).toHaveLength(4);
+    it('should accept "web-max" as a valid view state', () => {
+      const state: AgentViewState = 'web-max';
+      expect(state).toBe('web-max');
+    });
+
+    it('should accept "web-only" as a valid view state', () => {
+      const state: AgentViewState = 'web-only';
+      expect(state).toBe('web-only');
+    });
+
+    it('should have exactly 6 valid values', () => {
+      const validStates: AgentViewState[] = ['min', 'max', 'ui-only', 'chat-only', 'web-max', 'web-only'];
+      expect(validStates).toHaveLength(6);
     });
   });
 
@@ -231,7 +241,7 @@ describe('View state protocol messages', () => {
     });
 
     it('should support all view state values in request', () => {
-      const states: AgentViewState[] = ['min', 'max', 'ui-only', 'chat-only'];
+      const states: AgentViewState[] = ['min', 'max', 'ui-only', 'chat-only', 'web-max', 'web-only'];
       for (const state of states) {
         const msg: IframeToShell = {
           type: 'request_view_state',
@@ -254,7 +264,7 @@ describe('View state protocol messages', () => {
     });
 
     it('should support all view state values', () => {
-      const states: AgentViewState[] = ['min', 'max', 'ui-only', 'chat-only'];
+      const states: AgentViewState[] = ['min', 'max', 'ui-only', 'chat-only', 'web-max', 'web-only'];
       for (const state of states) {
         const msg: ShellToIframe = {
           type: 'set_view_state',

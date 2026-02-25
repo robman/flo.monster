@@ -95,6 +95,12 @@ export class OuterSkinContainer {
    */
   show(): void {
     this.container.style.display = 'block';
+    // Set body + container background to match skin (iOS Safari samples body bg for chrome)
+    const bg = this.manifest.backgroundColor;
+    if (bg) {
+      document.body.style.background = bg;
+      this.container.style.background = bg;
+    }
     // Hide pre-rendered homepage content (SEO) when shadow DOM skin takes over
     const prerendered = document.getElementById('prerendered-homepage');
     if (prerendered) {
@@ -107,6 +113,8 @@ export class OuterSkinContainer {
    */
   hide(): void {
     this.container.style.display = 'none';
+    // Reset body background (CSS classes like mode-focused take over)
+    document.body.style.background = '';
   }
 
   /**

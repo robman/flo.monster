@@ -4,22 +4,27 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { readFile } from 'node:fs/promises';
+import { resolve, extname } from 'node:path';
 import type { HubConfig } from './config.js';
 import { timingSafeCompare } from './auth.js';
 import { FailedAuthRateLimiter } from './rate-limiter.js';
 import { handleCliProxy } from './cli-proxy.js';
+import { verifySignedUrl } from './utils/signed-url.js';
+import { validateFilePath } from './tools/hub-files.js';
 
 export interface HttpHandlerContext {
   config: HubConfig;
   rateLimiter: FailedAuthRateLimiter;
+  signingSecret?: Buffer;
+  agentStorePath?: string;
 }
 
 /**
  * CORS headers to set on all responses
  */
 const CORS_HEADERS: Record<string, string> = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type, x-hub-token, x-api-provider, anthropic-version, Authorization',
   'Access-Control-Allow-Private-Network': 'true',
   'Access-Control-Max-Age': '86400',
@@ -31,9 +36,24 @@ const MAX_BODY_SIZE = 10 * 1024 * 1024;
 /**
  * Set CORS headers on a response
  */
-function setCorsHeaders(res: ServerResponse): void {
+function setCorsHeaders(res: ServerResponse, requestOrigin?: string, allowedOrigins?: string[]): void {
+  // Set the standard CORS headers (methods, allowed headers, PNA, max-age)
   for (const [key, value] of Object.entries(CORS_HEADERS)) {
     res.setHeader(key, value);
+  }
+
+  // Set Access-Control-Allow-Origin based on config
+  if (!allowedOrigins || allowedOrigins.length === 0) {
+    // No restriction — allow all
+    res.setHeader('Access-Control-Allow-Origin', '*');
+  } else if (requestOrigin && allowedOrigins.includes(requestOrigin)) {
+    // Reflect the matching origin
+    res.setHeader('Access-Control-Allow-Origin', requestOrigin);
+    res.setHeader('Vary', 'Origin');
+  } else {
+    // No match — use the first allowed origin (browser will block mismatched)
+    res.setHeader('Access-Control-Allow-Origin', allowedOrigins[0]);
+    res.setHeader('Vary', 'Origin');
   }
 }
 
@@ -85,8 +105,8 @@ async function readBody(req: IncomingMessage): Promise<string> {
 /**
  * Send JSON response
  */
-function sendJson(res: ServerResponse, statusCode: number, data: unknown): void {
-  setCorsHeaders(res);
+function sendJson(res: ServerResponse, statusCode: number, data: unknown, requestOrigin?: string, allowedOrigins?: string[]): void {
+  setCorsHeaders(res, requestOrigin, allowedOrigins);
   res.writeHead(statusCode, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(data));
 }
@@ -94,8 +114,8 @@ function sendJson(res: ServerResponse, statusCode: number, data: unknown): void 
 /**
  * Send error response
  */
-function sendError(res: ServerResponse, statusCode: number, message: string, headers?: Record<string, string>): void {
-  setCorsHeaders(res);
+function sendError(res: ServerResponse, statusCode: number, message: string, headers?: Record<string, string>, requestOrigin?: string, allowedOrigins?: string[]): void {
+  setCorsHeaders(res, requestOrigin, allowedOrigins);
 
   const allHeaders: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -120,8 +140,8 @@ function validateHubToken(token: string | undefined, config: HubConfig): boolean
 /**
  * Handle OPTIONS preflight request
  */
-function handleOptions(res: ServerResponse): void {
-  setCorsHeaders(res);
+function handleOptions(res: ServerResponse, requestOrigin?: string, allowedOrigins?: string[]): void {
+  setCorsHeaders(res, requestOrigin, allowedOrigins);
   res.writeHead(204);
   res.end();
 }
@@ -129,8 +149,8 @@ function handleOptions(res: ServerResponse): void {
 /**
  * Handle GET /api/status
  */
-function handleStatus(res: ServerResponse): void {
-  sendJson(res, 200, { ok: true });
+function handleStatus(res: ServerResponse, requestOrigin?: string, allowedOrigins?: string[]): void {
+  sendJson(res, 200, { ok: true }, requestOrigin, allowedOrigins);
 }
 
 /**
@@ -216,6 +236,8 @@ async function handleProviderProxy(
   res: ServerResponse,
   context: HttpHandlerContext,
   route: ProviderRoute,
+  requestOrigin?: string,
+  allowedOrigins?: string[],
 ): Promise<void> {
   const { config, rateLimiter } = context;
   const clientIp = getClientIp(req, config.trustProxy ?? false);
@@ -225,7 +247,7 @@ async function handleProviderProxy(
   if (lockStatus.locked) {
     sendError(res, 429, 'Too many failed authentication attempts', {
       'Retry-After': String(lockStatus.retryAfter || 60),
-    });
+    }, requestOrigin, allowedOrigins);
     return;
   }
 
@@ -235,7 +257,7 @@ async function handleProviderProxy(
 
   if (!validateHubToken(tokenStr, config)) {
     rateLimiter.recordFailure(clientIp);
-    sendError(res, 401, 'Invalid or missing hub token');
+    sendError(res, 401, 'Invalid or missing hub token', undefined, requestOrigin, allowedOrigins);
     return;
   }
 
@@ -260,9 +282,9 @@ async function handleProviderProxy(
     } catch (err) {
       const message = (err as Error).message;
       if (message === 'Request body too large') {
-        sendError(res, 413, 'Request body too large');
+        sendError(res, 413, 'Request body too large', undefined, requestOrigin, allowedOrigins);
       } else {
-        sendError(res, 400, 'Failed to read request body');
+        sendError(res, 400, 'Failed to read request body', undefined, requestOrigin, allowedOrigins);
       }
       return;
     }
@@ -272,7 +294,7 @@ async function handleProviderProxy(
       rateLimiter.recordSuccess(clientIp);
     } catch (err) {
       console.error(`[http-server] CLI proxy error:`, (err as Error).message);
-      sendError(res, 502, `CLI proxy error: ${(err as Error).message}`);
+      sendError(res, 502, `CLI proxy error: ${(err as Error).message}`, undefined, requestOrigin, allowedOrigins);
     }
     return;
   }
@@ -286,7 +308,7 @@ async function handleProviderProxy(
 
   // Ollama doesn't necessarily need an API key
   if (!apiKey && effectiveProvider !== 'ollama') {
-    sendError(res, 503, `No shared API key configured for provider: ${effectiveProvider}`);
+    sendError(res, 503, `No shared API key configured for provider: ${effectiveProvider}`, undefined, requestOrigin, allowedOrigins);
     return;
   }
 
@@ -297,15 +319,15 @@ async function handleProviderProxy(
   } catch (err) {
     const message = (err as Error).message;
     if (message === 'Request body too large') {
-      sendError(res, 413, 'Request body too large');
+      sendError(res, 413, 'Request body too large', undefined, requestOrigin, allowedOrigins);
     } else {
-      sendError(res, 400, 'Failed to read request body');
+      sendError(res, 400, 'Failed to read request body', undefined, requestOrigin, allowedOrigins);
     }
     return;
   }
 
   if (!body || body.length === 0) {
-    sendError(res, 400, 'Empty request body');
+    sendError(res, 400, 'Empty request body', undefined, requestOrigin, allowedOrigins);
     return;
   }
 
@@ -340,7 +362,7 @@ async function handleProviderProxy(
     }
 
     // Stream response back to client
-    setCorsHeaders(res);
+    setCorsHeaders(res, requestOrigin, allowedOrigins);
     res.writeHead(upstreamResponse.status, {
       'Content-Type': upstreamResponse.headers.get('content-type') || 'application/json',
     });
@@ -366,9 +388,79 @@ async function handleProviderProxy(
       res.end(text);
     }
   } catch (err) {
-    sendError(res, 502, `Failed to proxy request: ${(err as Error).message}`);
+    sendError(res, 502, `Failed to proxy request: ${(err as Error).message}`, undefined, requestOrigin, allowedOrigins);
   }
 }
+
+/** Content-Type map for common file extensions */
+const MIME_TYPES: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.svg': 'image/svg+xml',
+  '.json': 'application/json',
+  '.txt': 'text/plain',
+  '.html': 'text/html',
+  '.css': 'text/css',
+  '.js': 'application/javascript',
+  '.pdf': 'application/pdf',
+};
+
+/**
+ * Handle GET /agents/:agentId/files/* — serve agent files via signed URL
+ */
+async function handleAgentFile(
+  res: ServerResponse,
+  agentId: string,
+  filePath: string,
+  sig: string,
+  exp: number,
+  context: HttpHandlerContext,
+  requestOrigin?: string,
+  allowedOrigins?: string[],
+): Promise<void> {
+  const { signingSecret, agentStorePath } = context;
+
+  if (!signingSecret || !agentStorePath) {
+    sendError(res, 503, 'File serving not configured', undefined, requestOrigin, allowedOrigins);
+    return;
+  }
+
+  // Verify signed URL
+  if (!verifySignedUrl(signingSecret, agentId, filePath, sig, exp)) {
+    sendError(res, 403, 'Invalid or expired signature', undefined, requestOrigin, allowedOrigins);
+    return;
+  }
+
+  // Resolve file within agent's files directory
+  const filesRoot = resolve(agentStorePath, agentId, 'files');
+  const resolvedPath = await validateFilePath(filePath, filesRoot);
+  if (!resolvedPath) {
+    sendError(res, 404, 'File not found', undefined, requestOrigin, allowedOrigins);
+    return;
+  }
+
+  try {
+    const data = await readFile(resolvedPath);
+    const ext = extname(resolvedPath).toLowerCase();
+    const contentType = MIME_TYPES[ext] || 'application/octet-stream';
+
+    setCorsHeaders(res, requestOrigin, allowedOrigins);
+    res.writeHead(200, {
+      'Content-Type': contentType,
+      'Content-Length': data.length,
+      'Cache-Control': 'private, max-age=3600',
+    });
+    res.end(data);
+  } catch {
+    sendError(res, 404, 'File not found', undefined, requestOrigin, allowedOrigins);
+  }
+}
+
+/** Parse /agents/:agentId/files/* route */
+const AGENT_FILE_ROUTE = /^\/agents\/([^/]+)\/files\/(.+)$/;
 
 /**
  * Create HTTP request handler for hub API endpoints
@@ -379,16 +471,18 @@ export function createHttpRequestHandler(
   return (req: IncomingMessage, res: ServerResponse): void => {
     const url = req.url || '/';
     const method = req.method || 'GET';
+    const requestOrigin = req.headers.origin as string | undefined;
+    const allowedOrigins = context.config.allowedOrigins;
 
     // Handle CORS preflight
-    if (method === 'OPTIONS' && url.startsWith('/api/')) {
-      handleOptions(res);
+    if (method === 'OPTIONS' && (url.startsWith('/api/') || url.startsWith('/agents/'))) {
+      handleOptions(res, requestOrigin, allowedOrigins);
       return;
     }
 
     // Handle GET /api/status
     if (method === 'GET' && url === '/api/status') {
-      handleStatus(res);
+      handleStatus(res, requestOrigin, allowedOrigins);
       return;
     }
 
@@ -398,19 +492,39 @@ export function createHttpRequestHandler(
       return;
     }
 
+    // Handle GET /agents/:agentId/files/* — signed URL file serving
+    if (method === 'GET' && url.startsWith('/agents/')) {
+      // Parse URL and query string
+      const [pathname, queryString] = url.split('?');
+      const match = pathname.match(AGENT_FILE_ROUTE);
+      if (match) {
+        const agentId = decodeURIComponent(match[1]);
+        const filePath = decodeURIComponent(match[2]);
+        const params = new URLSearchParams(queryString || '');
+        const sig = params.get('sig') || '';
+        const exp = parseInt(params.get('exp') || '0', 10);
+
+        handleAgentFile(res, agentId, filePath, sig, exp, context, requestOrigin, allowedOrigins).catch((err) => {
+          console.error('[http-server] Error serving agent file:', err);
+          sendError(res, 500, 'Internal server error', undefined, requestOrigin, allowedOrigins);
+        });
+        return;
+      }
+    }
+
     // Handle POST /api/* (provider proxy)
     if (method === 'POST' && url.startsWith('/api/')) {
       const route = getProviderRoute(url, context.config);
       if (route) {
-        handleProviderProxy(req, res, context, route).catch((err) => {
+        handleProviderProxy(req, res, context, route, requestOrigin, allowedOrigins).catch((err) => {
           console.error('[http-server] Error handling provider proxy:', err);
-          sendError(res, 500, 'Internal server error');
+          sendError(res, 500, 'Internal server error', undefined, requestOrigin, allowedOrigins);
         });
         return;
       }
     }
 
     // 404 for unknown routes
-    sendError(res, 404, 'Not found');
+    sendError(res, 404, 'Not found', undefined, requestOrigin, allowedOrigins);
   };
 }

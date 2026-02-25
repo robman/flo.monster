@@ -5,6 +5,7 @@
   "contentUrl": "content.html",
   "stylesUrl": "styles.css",
   "scriptUrl": "script.js",
+  "backgroundColor": "#1a1a2e",
   "homepage": {
     "sections": ["welcome"],
     "ctaAction": "credentials"

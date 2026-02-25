@@ -518,7 +518,25 @@ class Shell {
 
     // Update status bar with agent count
     this.agentManager.onAgentCreated(() => this.uiManager.updateStatusBar(statusState));
-    this.agentManager.onAgentTerminated(() => this.uiManager.updateStatusBar(statusState));
+    this.agentManager.onAgentTerminated((agentId) => {
+      this.uiManager.updateStatusBar(statusState);
+
+      // Clean up browser persistence for deleted agent
+      (async () => {
+        try {
+          // Remove agent data from IDB (metadata + conversation)
+          await this.persistence.deleteAgent(agentId);
+          // Remove agent files from storage (OPFS/IDB)
+          const provider = await getStorageProvider();
+          await provider.clearAgent(agentId);
+          // Re-save registry immediately so deleted agent doesn't reappear on reload
+          await this.lifecycleManager.saveAgentRegistry();
+          console.log(`[flo] Cleaned up persistence for deleted agent ${agentId}`);
+        } catch (err) {
+          console.warn(`[flo] Failed to clean up persistence for agent ${agentId}:`, err);
+        }
+      })();
+    });
 
     // Wire agent notify_user events to notification panel
     this.agentManager.onAgentCreated((agent) => {

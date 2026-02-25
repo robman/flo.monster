@@ -1,6 +1,6 @@
 import type { TokenUsage } from './messages.js';
 import type { ToolResult } from './tools.js';
-import type { AgentState } from './agent.js';
+import type { AgentState, AgentViewState } from './agent.js';
 import type { CostEstimate } from './provider.js';
 
 export interface MessageStartEvent {
@@ -80,8 +80,8 @@ export interface VisibilityChangeEvent {
 
 export interface ViewStateChangeEvent {
   type: 'view_state_change';
-  from: 'min' | 'max' | 'ui-only' | 'chat-only';
-  to: 'min' | 'max' | 'ui-only' | 'chat-only';
+  from: AgentViewState;
+  to: AgentViewState;
   requestedBy: 'user' | 'agent';
 }
 

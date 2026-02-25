@@ -8,6 +8,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import type { HubConfig } from '../config.js';
+import { validateConfig, saveConfig, getConfigPath } from '../config.js';
 import type { HubServer, ConnectedClient } from '../server.js';
 import type {
   AdminToHub,
@@ -57,6 +58,35 @@ function sendMessage(ws: WebSocket, message: HubToAdmin): void {
 }
 
 /**
+ * Allowlist of config field paths that can be updated via admin command.
+ * Top-level keys set directly; dotted paths set nested properties.
+ */
+const CONFIG_UPDATE_ALLOWLIST = new Set([
+  'sharedApiKeys',
+  'pushConfig',
+  'tools.browse.enabled',
+  'tools.browse.maxConcurrentSessions',
+  'tools.browse.sessionTimeoutMinutes',
+  'hooks',
+]);
+
+/**
+ * Set a value at a dotted path on a target object.
+ * E.g., setAtPath(obj, 'tools.browse.enabled', false) sets obj.tools.browse.enabled = false.
+ */
+function setAtPath(target: Record<string, unknown>, path: string, value: unknown): void {
+  const parts = path.split('.');
+  let current: Record<string, unknown> = target;
+  for (let i = 0; i < parts.length - 1; i++) {
+    if (current[parts[i]] === undefined || typeof current[parts[i]] !== 'object' || current[parts[i]] === null) {
+      current[parts[i]] = {};
+    }
+    current = current[parts[i]] as Record<string, unknown>;
+  }
+  current[parts[parts.length - 1]] = value;
+}
+
+/**
  * Create the admin server
  */
 export function createAdminServer(
@@ -69,9 +99,11 @@ export function createAdminServer(
   let totalRequests = 0;
   const authRateLimiter = new FailedAuthRateLimiter(5, 15); // 5 attempts, 15 min lockout
 
+  // SECURITY: Admin server always binds to loopback only.
+  // It must never be exposed on external interfaces, regardless of config.host.
   const wss = new WebSocketServer({
     port: config.adminPort,
-    host: config.host,
+    host: '127.0.0.1',
   });
 
   /**
@@ -268,10 +300,10 @@ export function createAdminServer(
         if (runner) {
           runner.kill();
           hubServer.agents.delete(message.agentId);
-          sendMessage(client.ws, { type: 'ok', message: `Agent ${message.agentId} killed` });
-        } else {
-          sendMessage(client.ws, { type: 'error', message: `Agent not found: ${message.agentId}` });
         }
+        hubServer.browseSessionManager?.closeSession(message.agentId).catch(() => {});
+        await hubServer.agentStore.delete(message.agentId);
+        sendMessage(client.ws, { type: 'ok', message: `Agent ${message.agentId} killed` });
         break;
       }
 
@@ -281,6 +313,7 @@ export function createAdminServer(
           runner.kill();
           hubServer.agents.delete(message.agentId);
         }
+        hubServer.browseSessionManager?.closeSession(message.agentId).catch(() => {});
         await hubServer.agentStore.delete(message.agentId);
         sendMessage(client.ws, { type: 'ok', message: `Agent ${message.agentId} removed` });
         break;
@@ -491,8 +524,9 @@ export function createAdminServer(
       case 'nuke':
         switch (message.target) {
           case 'agents':
-            for (const runner of hubServer.agents.values()) {
+            for (const [id, runner] of hubServer.agents) {
               runner.kill();
+              hubServer.browseSessionManager?.closeSession(id).catch(() => {});
             }
             hubServer.agents.clear();
             sendMessage(client.ws, { type: 'ok', message: 'All agents killed' });
@@ -506,8 +540,9 @@ export function createAdminServer(
             break;
 
           case 'all':
-            for (const runner of hubServer.agents.values()) {
+            for (const [id, runner] of hubServer.agents) {
               runner.kill();
+              hubServer.browseSessionManager?.closeSession(id).catch(() => {});
             }
             hubServer.agents.clear();
             for (const c of hubServer.clients) {
@@ -517,6 +552,62 @@ export function createAdminServer(
             break;
         }
         break;
+
+      case 'update_config': {
+        // Atomic validation: reject entire request if ANY field is not in the allowlist
+        const disallowed = Object.keys(message.fields).filter(f => !CONFIG_UPDATE_ALLOWLIST.has(f));
+        if (disallowed.length > 0) {
+          sendMessage(client.ws, {
+            type: 'config_updated',
+            success: false,
+            error: `Disallowed fields: ${disallowed.join(', ')}`,
+          });
+          break;
+        }
+
+        try {
+          // Deep merge allowed fields into a copy of the current config
+          const merged = JSON.parse(JSON.stringify(config)) as Record<string, unknown>;
+          for (const [path, value] of Object.entries(message.fields)) {
+            setAtPath(merged, path, value);
+          }
+
+          // Validate the merged config
+          if (!validateConfig(merged)) {
+            sendMessage(client.ws, {
+              type: 'config_updated',
+              success: false,
+              error: 'Validation failed: merged config is invalid',
+            });
+            break;
+          }
+
+          // Save to disk
+          await saveConfig(merged as unknown as HubConfig);
+
+          // Update the in-memory config reference
+          Object.assign(config, merged);
+
+          sendMessage(client.ws, {
+            type: 'config_updated',
+            success: true,
+          });
+        } catch (err: unknown) {
+          sendMessage(client.ws, {
+            type: 'config_updated',
+            success: false,
+            error: `Failed to update config: ${(err as Error).message}`,
+          });
+        }
+        break;
+      }
+
+      case 'restart_hub': {
+        sendMessage(client.ws, { type: 'ok', message: 'Hub restarting...' });
+        // Delay exit to allow the response to be sent over WebSocket
+        setTimeout(() => process.exit(1), 100);
+        break;
+      }
 
       default:
         sendMessage(client.ws, {

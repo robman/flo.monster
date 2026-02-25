@@ -96,6 +96,12 @@ export class HubClient {
   private agentEventCallbacks: ((agentId: string, event: any) => void)[] = [];
   private conversationHistoryCallbacks: ((agentId: string, messages: any[]) => void)[] = [];
   private pushEventCallbacks: ((msg: any) => void)[] = [];
+  private browseStreamCallbacks: ((agentId: string, data: { token: string; streamPort: number; viewport: { width: number; height: number }; streamUrl?: string }) => void)[] = [];
+  private browseStreamStoppedCallbacks: ((agentId: string) => void)[] = [];
+  private browseStreamErrorCallbacks: ((agentId: string, error: string) => void)[] = [];
+  private interveneGrantedCallbacks: ((agentId: string, mode: 'visible' | 'private') => void)[] = [];
+  private interveneDeniedCallbacks: ((agentId: string, reason: string) => void)[] = [];
+  private interveneEndedCallbacks: ((agentId: string, reason: string, notification?: string) => void)[] = [];
   private vapidKeys = new Map<string, string>(); // connectionId → VAPID public key
   private nextReqId = 0;
 
@@ -385,6 +391,7 @@ export class HubClient {
     connectionId: string,
     name: string,
     input: unknown,
+    agentId?: string,
   ): Promise<{ result: string; is_error?: boolean }> {
     const state = this.connections.get(connectionId);
     if (!state || !state.conn.connected) {
@@ -399,7 +406,7 @@ export class HubClient {
         reject,
       });
 
-      this.send(state.ws, { type: 'tool_request', id, name, input });
+      this.send(state.ws, { type: 'tool_request', id, name, input, agentId });
 
       // Timeout after 5 minutes
       setTimeout(() => {
@@ -897,6 +904,116 @@ export class HubClient {
   }
 
   /**
+   * Request a browse stream token for watching an agent's headless browser.
+   * Returns the stream token, port, and viewport dimensions.
+   */
+  requestBrowseStream(connectionId: string, agentId: string): void {
+    const state = this.connections.get(connectionId);
+    if (state?.conn.connected) {
+      this.send(state.ws, { type: 'browse_stream_request', agentId } as any);
+    }
+  }
+
+  /**
+   * Stop a browse stream for an agent.
+   */
+  stopBrowseStream(connectionId: string, agentId: string): void {
+    const state = this.connections.get(connectionId);
+    if (state?.conn.connected) {
+      this.send(state.ws, { type: 'browse_stream_stop', agentId } as any);
+    }
+  }
+
+  /**
+   * Request intervention on an agent's browse session.
+   */
+  requestIntervene(connectionId: string, agentId: string, mode: 'visible' | 'private'): void {
+    const state = this.connections.get(connectionId);
+    if (state?.conn.connected) {
+      this.send(state.ws, { type: 'browse_intervene_request', agentId, mode });
+    }
+  }
+
+  /**
+   * Release intervention on an agent's browse session.
+   */
+  releaseIntervene(connectionId: string, agentId: string): void {
+    const state = this.connections.get(connectionId);
+    if (state?.conn.connected) {
+      this.send(state.ws, { type: 'browse_intervene_release', agentId });
+    }
+  }
+
+  /**
+   * Register a handler for intervention granted events.
+   */
+  onInterveneGranted(handler: (agentId: string, mode: 'visible' | 'private') => void): () => void {
+    this.interveneGrantedCallbacks.push(handler);
+    return () => {
+      const idx = this.interveneGrantedCallbacks.indexOf(handler);
+      if (idx >= 0) this.interveneGrantedCallbacks.splice(idx, 1);
+    };
+  }
+
+  /**
+   * Register a handler for intervention denied events.
+   */
+  onInterveneDenied(handler: (agentId: string, reason: string) => void): () => void {
+    this.interveneDeniedCallbacks.push(handler);
+    return () => {
+      const idx = this.interveneDeniedCallbacks.indexOf(handler);
+      if (idx >= 0) this.interveneDeniedCallbacks.splice(idx, 1);
+    };
+  }
+
+  /**
+   * Register a handler for intervention ended events.
+   * notification is included for browser-routed agents (hub-persisted get it via runner).
+   */
+  onInterveneEnded(handler: (agentId: string, reason: string, notification?: string) => void): () => void {
+    this.interveneEndedCallbacks.push(handler);
+    return () => {
+      const idx = this.interveneEndedCallbacks.indexOf(handler);
+      if (idx >= 0) this.interveneEndedCallbacks.splice(idx, 1);
+    };
+  }
+
+  /**
+   * Register a handler for browse stream token responses.
+   */
+  onBrowseStreamToken(
+    handler: (agentId: string, data: { token: string; streamPort: number; viewport: { width: number; height: number }; streamUrl?: string }) => void
+  ): () => void {
+    this.browseStreamCallbacks.push(handler);
+    return () => {
+      const idx = this.browseStreamCallbacks.indexOf(handler);
+      if (idx >= 0) this.browseStreamCallbacks.splice(idx, 1);
+    };
+  }
+
+  /**
+   * Register a handler for browse stream stopped notifications.
+   */
+  onBrowseStreamStopped(handler: (agentId: string) => void): () => void {
+    this.browseStreamStoppedCallbacks.push(handler);
+    return () => {
+      const idx = this.browseStreamStoppedCallbacks.indexOf(handler);
+      if (idx >= 0) this.browseStreamStoppedCallbacks.splice(idx, 1);
+    };
+  }
+
+  /**
+   * Register a handler for browse stream error notifications.
+   */
+  onBrowseStreamError(handler: (agentId: string, error: string) => void): () => void {
+    this.browseStreamErrorCallbacks.push(handler);
+    return () => {
+      const idx = this.browseStreamErrorCallbacks.indexOf(handler);
+      if (idx >= 0) this.browseStreamErrorCallbacks.splice(idx, 1);
+    };
+  }
+
+  /**
    * Request list of all agents on a hub
    */
   async listHubAgents(connectionId: string): Promise<unknown[]> {
@@ -1178,6 +1295,54 @@ export class HubClient {
       case 'push_verify_result': {
         for (const cb of this.pushEventCallbacks) {
           try { cb(msg); } catch { /* ignore */ }
+        }
+        break;
+      }
+
+      case 'browse_stream_token': {
+        const bst = msg as unknown as { type: string; agentId: string; token: string; streamPort: number; viewport: { width: number; height: number }; streamUrl?: string };
+        for (const cb of this.browseStreamCallbacks) {
+          try { cb(bst.agentId, { token: bst.token, streamPort: bst.streamPort, viewport: bst.viewport, streamUrl: bst.streamUrl }); } catch { /* ignore */ }
+        }
+        break;
+      }
+
+      case 'browse_stream_stopped': {
+        const bss = msg as unknown as { type: string; agentId: string };
+        for (const cb of this.browseStreamStoppedCallbacks) {
+          try { cb(bss.agentId); } catch { /* ignore */ }
+        }
+        break;
+      }
+
+      case 'browse_stream_error': {
+        const bse = msg as unknown as { type: string; agentId: string; error: string };
+        for (const cb of this.browseStreamErrorCallbacks) {
+          try { cb(bse.agentId, bse.error); } catch { /* ignore */ }
+        }
+        break;
+      }
+
+      case 'browse_intervene_granted': {
+        const big = msg as unknown as { type: string; agentId: string; mode: 'visible' | 'private' };
+        for (const cb of this.interveneGrantedCallbacks) {
+          try { cb(big.agentId, big.mode); } catch { /* ignore */ }
+        }
+        break;
+      }
+
+      case 'browse_intervene_denied': {
+        const bid = msg as unknown as { type: string; agentId: string; reason: string };
+        for (const cb of this.interveneDeniedCallbacks) {
+          try { cb(bid.agentId, bid.reason); } catch { /* ignore */ }
+        }
+        break;
+      }
+
+      case 'browse_intervene_ended': {
+        const bie = msg as unknown as { type: string; agentId: string; reason: string; notification?: string };
+        for (const cb of this.interveneEndedCallbacks) {
+          try { cb(bie.agentId, bie.reason, bie.notification); } catch { /* ignore */ }
         }
         break;
       }

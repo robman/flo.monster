@@ -47,7 +47,7 @@ export function getHubCapabilities(
   config: AgentConfig,
   hubAgentId: string,
   browserToolRouter?: BrowserToolRouter,
-  options?: { hasStateStore?: boolean; hasFilesRoot?: boolean; hasDomContainer?: boolean; hasScheduler?: boolean },
+  options?: { hasStateStore?: boolean; hasFilesRoot?: boolean; hasDomContainer?: boolean; hasScheduler?: boolean; hasBrowse?: boolean },
 ): HubCapabilitiesResult {
   const browserConnected = browserToolRouter?.isAvailable(hubAgentId) ?? false;
   const browserRouted = browserConnected
@@ -63,6 +63,7 @@ export function getHubCapabilities(
   const hubTools = [...HUB_NATIVE_TOOLS];
   if (options?.hasScheduler) hubTools.push('schedule');
   if (options?.hasStateStore) hubTools.push('runjs');
+  if (options?.hasBrowse) hubTools.push('browse');
 
   return {
     runtime: 'hub',

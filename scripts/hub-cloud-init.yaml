@@ -52,6 +52,25 @@ write_files:
       [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
       nvm use 22 >/dev/null 2>&1
 
+  # Fontconfig: prefer Liberation Sans for Arial, desktop-like rendering for headless Chrome
+  - path: /home/flo-hub/.config/fontconfig/fonts.conf
+    permissions: '0644'
+    content: |
+      <?xml version="1.0"?>
+      <!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
+      <fontconfig>
+        <alias><family>Arial</family><prefer><family>Liberation Sans</family></prefer></alias>
+        <alias><family>Times New Roman</family><prefer><family>Liberation Serif</family></prefer></alias>
+        <alias><family>Courier New</family><prefer><family>Liberation Mono</family></prefer></alias>
+        <match target="font">
+          <edit name="hinting" mode="assign"><bool>true</bool></edit>
+          <edit name="hintstyle" mode="assign"><const>hintfull</const></edit>
+          <edit name="antialias" mode="assign"><bool>true</bool></edit>
+          <edit name="rgba" mode="assign"><const>rgb</const></edit>
+          <edit name="lcdfilter" mode="assign"><const>lcddefault</const></edit>
+        </match>
+      </fontconfig>
+
   # Hub configuration
   # NOTE: no owner field — see setup-env.sh comment above
   - path: /home/flo-hub/.flo-monster/hub.json
@@ -115,6 +134,24 @@ packages:
   - curl
   - build-essential
   - jq
+  - fonts-liberation2
+  - fonts-noto-core
+  - fonts-dejavu-extra
+  - fonts-freefont-ttf
+  - fontconfig
+  # Chromium system deps for playwright-core headless browser
+  - libatk1.0-0t64
+  - libatk-bridge2.0-0t64
+  - libcups2t64
+  - libatspi2.0-0t64
+  - libxcomposite1
+  - libxdamage1
+  - libxfixes3
+  - libxrandr2
+  - libgbm1
+  - libcairo2
+  - libpango-1.0-0
+  - libasound2t64
 
 runcmd:
   # Fix home directory ownership — write_files may create /home/flo-hub as root
@@ -131,6 +168,10 @@ runcmd:
   # Source setup-env.sh from .bashrc for interactive shells
   - su - flo-hub -c 'echo "source ~/setup-env.sh" >> ~/.bashrc'
 
+  # Fontconfig ownership fix (write_files runs as root) + rebuild cache
+  - chown -R flo-hub:flo-hub /home/flo-hub/.config
+  - fc-cache -f
+
   # Install nvm and Node.js 22
   - su - flo-hub -c 'curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash'
   - su - flo-hub -c 'source ~/.nvm/nvm.sh && nvm install 22 && nvm alias default 22'
@@ -146,6 +187,8 @@ runcmd:
       su - flo-hub -c 'git clone {{FLO_REPO_URL}} /home/flo-hub/flo.monster'
     fi
   - su - flo-hub -c 'source ~/setup-env.sh && cd /home/flo-hub/flo.monster && pnpm install --frozen-lockfile'
+  # Install chromium from packages/hub where playwright-core is a direct dependency
+  - su - flo-hub -c 'source ~/setup-env.sh && cd /home/flo-hub/flo.monster/packages/hub && npx playwright-core install chromium'
 
   # Conditional: Generate self-signed TLS cert for local mode and set publicHost
   - |

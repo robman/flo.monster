@@ -903,7 +903,7 @@ describe('MessageRelay', () => {
       await new Promise(r => setTimeout(r, 50));
 
       // Should use hub-2 (agent-specific) not hub-1 (first available)
-      expect(mockHubClient.executeTool).toHaveBeenCalledWith('hub-2', 'bash', { command: 'ls' });
+      expect(mockHubClient.executeTool).toHaveBeenCalledWith('hub-2', 'bash', { command: 'ls' }, 'a1');
 
       relay.stop();
     });
@@ -939,7 +939,7 @@ describe('MessageRelay', () => {
       await new Promise(r => setTimeout(r, 50));
 
       expect(mockHubClient.findToolHub).toHaveBeenCalledWith('bash');
-      expect(mockHubClient.executeTool).toHaveBeenCalledWith('hub-1', 'bash', { command: 'ls' });
+      expect(mockHubClient.executeTool).toHaveBeenCalledWith('hub-1', 'bash', { command: 'ls' }, 'a1');
 
       relay.stop();
     });

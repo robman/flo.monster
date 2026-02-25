@@ -11,7 +11,7 @@ import type { SerializedDomState } from '../session/serialization.js';
 // Browser → Hub WebSocket messages
 export type ShellToHub =
   | { type: 'auth'; token: string }
-  | { type: 'tool_request'; id: string; name: string; input: unknown }
+  | { type: 'tool_request'; id: string; name: string; input: unknown; agentId?: string }
   | { type: 'fetch_request'; id: string; url: string; options?: RequestInit }
   | { type: 'api_proxy_request'; id: string; provider: string; path: string; payload: unknown }
   | { type: 'transfer_key'; hash: string; provider: string; encryptedKey: string }
@@ -30,7 +30,11 @@ export type ShellToHub =
   | { type: 'push_subscribe'; deviceId: string; subscription: { endpoint: string; keys: { p256dh: string; auth: string } } }
   | { type: 'push_verify_pin'; deviceId: string; pin: string }
   | { type: 'push_unsubscribe'; deviceId: string }
-  | { type: 'visibility_state'; visible: boolean; deviceId: string };
+  | { type: 'visibility_state'; visible: boolean; deviceId: string }
+  | { type: 'browse_stream_request'; agentId: string }
+  | { type: 'browse_stream_stop'; agentId: string }
+  | { type: 'browse_intervene_request'; agentId: string; mode: 'visible' | 'private' }
+  | { type: 'browse_intervene_release'; agentId: string };
 
 // Hub → Browser WebSocket messages
 export type HubToShell =
@@ -44,7 +48,7 @@ export type HubToShell =
   | { type: 'persist_result'; hubAgentId: string; success: boolean; error?: string }
   | { type: 'agent_event'; agentId: string; event: AgentEvent }
   | { type: 'agent_loop_event'; agentId: string; event: AgentEvent }
-  | { type: 'conversation_history'; agentId: string; messages: Array<{ role: string; content: unknown }> }
+  | { type: 'conversation_history'; agentId: string; messages: Array<{ role?: string; type?: string; content: unknown }> }
   | { type: 'agent_state'; agentId: string; state: AgentState }
   | { type: 'restore_session'; session: unknown }
   | { type: 'hub_agents_list'; agents: HubAgentSummary[] }
@@ -56,7 +60,13 @@ export type HubToShell =
   | { type: 'file_push'; hubAgentId: string; path: string; content?: string; action: 'write' | 'delete' }
   | { type: 'push_subscribe_result'; deviceId: string; success: boolean; error?: string }
   | { type: 'push_verify_result'; deviceId: string; verified: boolean }
-  | { type: 'vapid_public_key'; key: string };
+  | { type: 'vapid_public_key'; key: string }
+  | { type: 'browse_stream_token'; agentId: string; token: string; streamPort: number; viewport: { width: number; height: number }; streamUrl?: string }
+  | { type: 'browse_stream_stopped'; agentId: string }
+  | { type: 'browse_stream_error'; agentId: string; error: string }
+  | { type: 'browse_intervene_granted'; agentId: string; mode: 'visible' | 'private' }
+  | { type: 'browse_intervene_denied'; agentId: string; reason: string }
+  | { type: 'browse_intervene_ended'; agentId: string; reason: string };
 
 export interface HubAgentSummary {
   hubAgentId: string;
@@ -279,7 +289,9 @@ export type AdminToHub =
   | { type: 'get_agent_schedules'; agentId?: string }
   | { type: 'get_agent_log'; agentId: string; limit?: number }
   | { type: 'get_agent_dom'; agentId: string }
-  | { type: 'get_agent_runjs_log'; agentId: string; limit?: number };
+  | { type: 'get_agent_runjs_log'; agentId: string; limit?: number }
+  | { type: 'update_config'; fields: Record<string, unknown> }
+  | { type: 'restart_hub' };
 
 // Hub → Admin WebSocket messages
 export type HubToAdmin =
@@ -297,9 +309,10 @@ export type HubToAdmin =
   | { type: 'error'; message: string; code?: string }
   | { type: 'ok'; message?: string }
   | { type: 'agent_schedules'; schedules: AdminScheduleInfo[] }
-  | { type: 'agent_log'; agentId: string; messages: Array<{ role: string; content: ContentBlock[]; timestamp: number }> }
+  | { type: 'agent_log'; agentId: string; messages: Array<{ role?: string; type?: string; content: ContentBlock[]; timestamp: number }> }
   | { type: 'agent_dom'; agentId: string; domState: SerializedDomState | null }
-  | { type: 'agent_runjs_log'; agentId: string; entries: Array<{ ts: number; code: string; result?: unknown; error?: string; consoleOutput: string[]; durationMs: number }> };
+  | { type: 'agent_runjs_log'; agentId: string; entries: Array<{ ts: number; code: string; result?: unknown; error?: string; consoleOutput: string[]; durationMs: number }> }
+  | { type: 'config_updated'; success: boolean; error?: string };
 
 // Supporting types for admin protocol
 export interface AdminAgentInfo {
